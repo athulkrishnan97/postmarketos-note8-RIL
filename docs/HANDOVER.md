@@ -619,3 +619,16 @@ Plan: docs/RIL-PLAN.md. Test sequence for the phone: docs/RIL-BRINGUP.md.
   and 0x82000501 return. Initialising Kinibi from Linux is blocked at its first call.
   Next: boot TWRP (Samsung-derived kernel with drivers/gud built in) and read its dmesg for
   MobiCore/t-base init, to tell "our boot chain breaks the SWd" from "SWd dead for everyone".
+- 2026-10-10 10:37 TWRP (kernel 4.4.111 omni-9.0, booted by S-Boot directly): the SAME SMCs
+  WORK there: "exynos_set_seh_address: set the seh address to el3 monitor well", Kinibi
+  t-base-EXYNOS64-Android-400A-V012 starts, CoreSwap 0->1 ok. => the secure world is fine;
+  our boot path breaks it. (`reboot recovery` from pmOS did not reach TWRP; user booted it.)
+  S-Boot passes its owned regions only on the cmdline (TWRP /proc/cmdline): ess_setup=0x91200000,
+  sec_avc_log 0x92202000, sec_tsp_log 0x92244000, sec_debug.base 0x92286000 (1M),
+  auto_summary_log 0x92388000, tima_log 0xb1000000, kaslr_region 0x80001000; FDT /memreserve/
+  only 0xE0000000. uniLoader CONFIG_PAYLOAD_ENTRY=0x90000000 put our kernel on top of them.
+- boot-v184-sbootmem.img (laptop work/): v183 + uniLoader PAYLOAD_ENTRY=0x80200000 (kernel now
+  0x80200000-0x8292ffff) + 0x91000000-0x92ffffff reserved no-map + ramoops moved to 0x9f000000
+  (pstore registers there). Boots, Plasma OK. smcprobe4 seh=1 step=1 STILL froze in SMC -123.
+  => not the S-Boot debug areas either. Next isolation: boot TWRP's 4.4 kernel THROUGH
+  uniLoader (uniLoader vs mainline), or diff what mainline does early (GIC, PSCI, timers).
