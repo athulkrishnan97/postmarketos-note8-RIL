@@ -578,3 +578,14 @@ Plan: docs/RIL-PLAN.md. Test sequence for the phone: docs/RIL-BRINGUP.md.
   CP_SECURE_BOOT).
 - SMC 0x82000700 READ_CTRL (smcprobe2) then froze the phone (no ping/ssh) - but the first,
   oopsed module was still stuck "Loading" at the time. Retest from a clean boot pending.
+- 2026-10-10 ~10:00: SMC test from a CLEAN boot (smcprobe2, pmu=0, phone dmesg streamed to the
+  laptop): SMC 0x82000700 READ_CTRL (CP_CTRL_NS) hard-froze the phone at once (no ping; not
+  even the pr_info just before the call reached the stream). CONFIRMED: the CP control SMC
+  hangs on this boot chain. Working vs hanging monitor calls so far:
+    works: 0x82000501 SMC_ABOX_PREPARE
+    hangs: 0x82000700 CP READ_CTRL, SMC_CMD_REG (-101, SFR access; ABOX GIC), UFS FMP SMCs
+  Both hanging classes make the monitor touch SFRs (PMU / GIC) on our behalf; the plain NS
+  read of PMU CP_CTRL_NS aborts. Ideas: caller CPU (test taskset -c 0), boot-time monitor
+  setup the stock kernel does (exynos-el3_mon.c: SMC_CMD_SET_SEH_ADDRESS -123,
+  PROTECT_KERNEL_TEXT -125, SET_DEBUG_MEM -120; exynos-cpumap SMC_CMD_CPUMAP -10), or
+  starting the CP from uniLoader before Linux.
