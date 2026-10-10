@@ -85,7 +85,7 @@ install -D -m 644 "$ADDONS/etc-xdg-plasma-workspace-env/glyphcache-workaround.sh
 install -m 755 "$ADDONS/etc-init.d/cbd" "$ADDONS/etc-init.d/modem-ipc" "$MNT/etc/init.d/"
 install -D -m 755 "$ADDONS/../tools/modem/android-env.sh" "$MNT/usr/local/bin/android-env"
 install -D -m 755 "$ADDONS/../tools/modem/rmnet-up.sh" "$MNT/usr/local/bin/rmnet-up"
-install -D -m 644 "$ADDONS/etc-udev-rules.d/60-greatlte-modem.rules" \
-	"$MNT/etc/udev/rules.d/60-greatlte-modem.rules"
+install -D -m 644 "$ADDONS/etc-udev-rules.d/61-greatlte-modem.rules" \
+	"$MNT/etc/udev/rules.d/61-greatlte-modem.rules"
 
 echo "addons installed into $IMG"

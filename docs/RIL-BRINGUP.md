@@ -7,7 +7,7 @@
 >    call (CP control, Kinibi) hard-freezes the SoC;
 > 2. bionic for `cbd` from TWRP (`tools/modem/make-android-root.sh`) - the dev
 >    phone's SYSTEM partition is empty;
-> 3. `/dev/umts_*` and RADIO owned by uid/gid 1001 (`60-greatlte-modem.rules`):
+> 3. `/dev/umts_*` and RADIO owned by uid/gid 1001 (`61-greatlte-modem.rules`):
 >    `cbd` drops root to the Android radio user.
 > Working run: `mifmon &` then `android-env run /vendor/bin/cbd -d -tss310 -bm -mm
 > -P platform/11120000.ufs/by-name/RADIO -n /efs`; then `printf 'AT\r' >

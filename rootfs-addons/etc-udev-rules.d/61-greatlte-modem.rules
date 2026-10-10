@@ -1,0 +1,6 @@
+# Shannon modem: Samsung's cbd drops root to the Android radio user (1001)
+# and then opens the modem devices and the RADIO partition (modem firmware).
+# PARTNAME comes from the kernel uevent (ID_PART_ENTRY_NAME is only set by
+# 60-persistent-storage.rules, too late for a 60-* rule).
+KERNEL=="umts_*", OWNER="1001", GROUP="1001", MODE="0660"
+SUBSYSTEM=="block", ENV{PARTNAME}=="RADIO", OWNER="1001", GROUP="1001", MODE="0660"

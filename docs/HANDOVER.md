@@ -660,7 +660,7 @@ pd_ignore_unused, uniLoader PAYLOAD_ENTRY 0x80200000. 40,441,856 bytes (BOOT 41,
   libcutils libc++ libbase libz; ld-android.so is internal to the linker) + lineage-18.1 cbd,
   in /var/lib/android-modem (tools/modem/make-android-root.sh). Run with
   LD_LIBRARY_PATH=/system/lib64. cbd drops to uid 1001 (radio): /dev/umts_* and RADIO (sda9)
-  must be 1001:1001 0660 (rootfs-addons/etc-udev-rules.d/60-greatlte-modem.rules).
+  must be 1001:1001 0660 (rootfs-addons/etc-udev-rules.d/61-greatlte-modem.rules).
 - `cbd -d -tss310 -bm -mm -P platform/11120000.ufs/by-name/RADIO -n /efs` with mifmon holding
   ipc0+rfs0: TOC read (BOOT/MAIN/VSS/NV), SECURITY_REQ mode 2 then mode 0 (size 7860, 38461112)
   -> return 0, MODEM_ON, BOOT_ON (cp_status=1), DL_START (magic BOOT), BOOT_OFF: INIT_START ->
@@ -734,3 +734,13 @@ SIM (Lidl Connect IE) inserted, same v186 boot, cbd + mifmon running.
   PWR_UP -> RFS NV writes answered -> CGDCONT OK -> CGATT OK (~5 s) -> 0d01/0d04 0x8000 ->
   IP config -> rmnet0 up -> ping OK. Services reordered accordingly (modem-ipc before cbd,
   -r by default).
+
+## 2026-10-10 ~12:40 SERVICES TESTED ON A REAL BOOT: MOBILE DATA 28 s AFTER POWER-ON
+- Installed on the phone: /etc/init.d/{modem-ipc,cbd}, /usr/local/bin/{android-env,rmnet-up,
+  mifmon}, /etc/udev/rules.d/61-greatlte-modem.rules, /etc/conf.d/modem-ipc (MIFMON_DATA=yes);
+  both services in the default runlevel.
+- First reboot: cbd could not open RADIO ("BIN ... open fail"): the old 60-greatlte rule
+  matched ENV{ID_PART_ENTRY_NAME}, which 60-persistent-storage.rules sets only after it
+  (lexical order). Now 61-greatlte-modem.rules matching the kernel's ENV{PARTNAME}.
+- Second reboot, nothing touched: CP online ~20 s, RFS NV writes answered at 21.8 s, data
+  call up at 27.6 s (default route via rmnet0 at metric 700), ping OK.
