@@ -3,13 +3,14 @@ maintainer="athul <athul@postmarketos.org>"
 pkgname=device-samsung-greatlte
 pkgdesc="Samsung Galaxy Note 8"
 pkgver=1
-pkgrel=3
+pkgrel=4
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
 options="!check !archcheck"
 depends="
 	device-samsung-greatlte-kernel
+	i2c-tools
 	mkbootimg
 	postmarketos-base
 	uniloader-samsung-greatlte

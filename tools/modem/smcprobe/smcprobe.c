@@ -8,10 +8,11 @@
  * [31:16], arg2 picks the low (0) or high (1) half). Other SMCs hang on this
  * boot chain (UFS FMP, ABOX SMC_CMD_REG), so try this one alone first:
  *
- *   insmod smcprobe.ko            read only (default)
+ *   insmod smcprobe.ko            SMC reads only (default)
  *   insmod smcprobe.ko write=1    also write CP_CTRL_NS back unchanged
  *
- * Compare with the plain PMU reads printed alongside (0x16480030/34/38).
+ * Plain non-secure reads of CP_CTRL_NS/S (0x16480030/34) abort, confirmed on
+the phone; pmu=1 tries the other status registers one by one.
  */
 #include <linux/arm-smccc.h>
 #include <linux/io.h>
@@ -33,6 +34,14 @@ static bool write;
 module_param(write, bool, 0444);
 MODULE_PARM_DESC(write, "write CP_CTRL_NS back with its current value");
 
+/*
+ * Plain reads of CP_CTRL_NS/S from the non-secure world take a synchronous
+ * external abort on greatlte (oops in init_module), so they are off by
+ * default; pmu=1 only reads CP_STAT and RESET_SEQUENCER_STATUS directly.
+ */
+static bool pmu;
+module_param(pmu, bool, 0444);
+MODULE_PARM_DESC(pmu, "also read CP_STAT/RESET_SEQ directly (non-secure)");
 static long smc(unsigned long a1, unsigned long a2, unsigned long a3)
 {
 	struct arm_smccc_res res;
@@ -57,14 +66,14 @@ static int smc_read(int reg, u32 *val)
 
 static int __init smcprobe_init(void)
 {
-	void __iomem *pmu = ioremap(PMU_BASE, 0x1000);
+	void __iomem *base = pmu ? ioremap(PMU_BASE, 0x1000) : NULL;
 	u32 s = 0, ns = 0;
 	int ret;
 
-	if (pmu)
-		pr_info("smcprobe: PMU CP_CTRL_NS=%08x CP_CTRL_S=%08x CP_STAT=%08x RESET_SEQ=%08x\n",
-			readl(pmu + PMU_CP_CTRL_NS), readl(pmu + PMU_CP_CTRL_S),
-			readl(pmu + PMU_CP_STAT), readl(pmu + PMU_RESET_SEQ));
+	if (base) {
+		pr_info("smcprobe: PMU RESET_SEQ=%08x\n", readl(base + PMU_RESET_SEQ));
+		pr_info("smcprobe: PMU CP_STAT=%08x\n", readl(base + PMU_CP_STAT));
+	}
 
 	pr_info("smcprobe: SMC READ_CTRL CP_CTRL_NS ...\n");
 	ret = smc_read(CP_CTRL_NS, &ns);
@@ -80,8 +89,8 @@ static int __init smcprobe_init(void)
 		pr_info("smcprobe: SMC WRITE_CTRL CP_CTRL_NS=%08x -> ret=%ld\n", ns, w);
 	}
 
-	if (pmu)
-		iounmap(pmu);
+	if (base)
+		iounmap(base);
 	/* nothing to keep loaded */
 	return -EAGAIN;
 }

@@ -1,0 +1,81 @@
+#!/bin/sh
+# charger: live view of the charger, the source's offers and the battery.
+#   charger      refresh every second (Ctrl-C to quit)
+#   charger -1   print once
+# Source details come from the greatlte-charging service (/run/greatlte-charging).
+
+STATUS=/run/greatlte-charging
+BAT=/sys/class/power_supply/max170xx_battery
+
+zone() { # thermal zone type -> "34.8 C"
+	for z in /sys/class/thermal/thermal_zone*; do
+		[ "$(cat $z/type 2>/dev/null)" = "$1" ] &&
+			{ awk '{ printf "%.1f C", $1 / 1000 }' $z/temp; return; }
+	done
+	echo "n/a"
+}
+
+show() {
+	source=; vbus_mv=0; input_limit_ma=0; charge_limit_ma=0; pdos=; pdo_selected=0; rp=0; bc12=0; updated=0
+	[ -r $STATUS ] && . $STATUS
+
+	case $source in
+	pd)          what="USB PD" ;;
+	typec-3a)    what="USB-C, 3 A advertised (no PD)" ;;
+	typec-1.5a)  what="USB-C, 1.5 A advertised (no PD)" ;;
+	dcp)         what="wall charger (BC1.2 DCP)" ;;
+	cdp)         what="charging USB port (BC1.2 CDP)" ;;
+	sdp)         what="USB port (500 mA)" ;;
+	none)        what="unplugged" ;;
+	"")          what="unknown (greatlte-charging service not running?)" ;;
+	*)           what=$source ;;
+	esac
+	age=$(( $(date +%s) - updated ))
+	[ -n "$source" ] && [ $age -gt 5 ] && what="$what  [status ${age}s old - service stopped?]"
+
+	echo "Charger  $what"
+	if [ "$source" != none ] && [ -n "$source" ]; then
+		awk -v v=$vbus_mv -v i=$input_limit_ma -v c=$charge_limit_ma 'BEGIN {
+			printf "  VBUS        %.1f V%s\n", v / 1000, (v > 5000 ? "  (negotiated)" : "")
+			printf "  Input max   %.2f A  = %.1f W\n", i / 1000, v * i / 1e6
+			printf "  Charge max  %.2f A\n", c / 1000 }'
+	fi
+	if [ -n "$pdos" ]; then
+		echo "  Offers:"
+		n=1
+		for p in $pdos; do
+			mark="  "; [ $n = "$pdo_selected" ] && mark="->"
+			case $p in
+			pps:*) echo "$p" | awk -F: -v m="$mark" -v n=$n '{ split($2, r, "-")
+				printf "   %s %d  PPS %.1f-%.1f V  %.2f A\n", m, n, r[1] / 1000, r[2] / 1000, $3 / 1000 }' ;;
+			*:*) echo "$p" | awk -F: -v m="$mark" -v n=$n '{
+				printf "   %s %d  %5.1f V  %.2f A  (%.0f W)\n", m, n, $1 / 1000, $2 / 1000, $1 * $2 / 1e6 }' ;;
+			*) echo "   $mark $n  (unsupported type)" ;;
+			esac
+			n=$((n + 1))
+		done
+	elif [ "$source" != none ] && [ -n "$source" ]; then
+		echo "  Offers:     no USB PD (Type-C Rp level $rp, BC1.2 type $bc12)"
+	fi
+
+	echo
+	awk -v uv=$(cat $BAT/voltage_now) -v ua=$(cat $BAT/current_now) -v avg=$(cat $BAT/current_avg) \
+	    -v cap=$(cat $BAT/capacity) -v st="$(cat $BAT/status)" 'BEGIN {
+		printf "Battery  %d%%  %s\n", cap, st
+		printf "  Voltage     %.3f V\n", uv / 1e6
+		printf "  Current     %+.3f A  (avg %+.3f A)\n", ua / 1e6, avg / 1e6
+		printf "  Power       %+.2f W\n", uv * ua / 1e12 }'
+	echo "  Temp        $(zone battery-thermal)   (charger $(zone charger-thermal), USB port $(zone usb-thermal))"
+}
+
+if [ "$1" = -1 ]; then
+	show
+	exit
+fi
+trap 'printf "\033[?25h"; exit 0' INT TERM
+printf "\033[?25l"
+while :; do
+	out=$(show)
+	printf "\033[H\033[2J%s\n\n(Ctrl-C to quit)\n" "$out"
+	sleep 1
+done

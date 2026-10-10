@@ -1,0 +1,313 @@
+From 728af387671938d012432f7119c6724a44d3b06a Mon Sep 17 00:00:00 2001
+From: Athul <athulkrishnan97@users.noreply.github.com>
+Date: Sat, 10 Oct 2026 00:46:58 +0100
+Subject: [PATCH] exynos8895: ADC, battery/charger/USB NTC thermal zones,
+ S2MM005 bus
+
+- clk: BUSC ADCIF gate (gout_busc_adcif_pclk).
+- iio: exynos-adc "samsung,exynos-adc-v3" (Exynos 8895): the V2 layout
+  with the data register at +0x08, 12 channels, C_TIME 6 (as downstream).
+- dts: the ADC; generic-adc-thermal sensors and thermal zones for the
+  battery (channel 4), charger (3) and USB connector (1) NTCs with the
+  stock N950F lookup table; HSI2C_USI12_1 enabled for the S2MM005 USB-C
+  PD controller at 0x33 (driven from userspace for now).
+---
+ .../boot/dts/exynos/exynos8895-greatlte.dts   | 110 ++++++++++++++++++
+ arch/arm64/boot/dts/exynos/exynos8895.dtsi    |  10 ++
+ drivers/clk/samsung/clk-exynos8895.c          |   8 +-
+ drivers/iio/adc/exynos_adc.c                  |  41 ++++++-
+ .../dt-bindings/clock/samsung,exynos8895.h    |   1 +
+ 5 files changed, 168 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895-greatlte.dts b/arch/arm64/boot/dts/exynos/exynos8895-greatlte.dts
+index 6ff3c0054..c47686e1c 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895-greatlte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos8895-greatlte.dts
+@@ -638,3 +638,113 @@ speaker_amp: amplifier@31 {
+ 		#sound-dai-cells = <0>;
+ 	};
+ };
++
++/*
++ * Charging support: the S2MM005 USB-C/PD controller (HSI2C_USI12_1 @ 0x33,
++ * driven from userspace by greatlte-charging) and the NTC thermistors on
++ * the ADC: battery (channel 4), charger (3) and USB connector (1).
++ */
++&usi12 {
++	samsung,mode = <USI_MODE_I2C1>;
++
++	status = "okay";
++};
++
++&hsi2c_30 {
++	status = "okay";
++};
++
++&adc {
++	status = "okay";
++};
++
++/ {
++	battery_ntc: thermal-sensor-battery {
++		compatible = "generic-adc-thermal";
++		#thermal-sensor-cells = <0>;
++		io-channels = <&adc 4>;
++		io-channel-names = "sensor-channel";
++		/* stock N950F NTC table (battery_data_greatlte_common.dtsi) */
++		temperature-lookup-table = <
++			(-20000) 3686 (-15000) 3575 (-10000) 3445 (-5000) 3293
++			0 3122 5000 2932 10000 2726 15000 2512
++			20000 2291 25000 2048 30000 1811 35000 1586
++			40000 1378 45000 1189 50000 1021 55000 887
++			60000 769 65000 655 70000 558 75000 474
++			80000 404 85000 345 90000 294>;
++	};
++
++	charger_ntc: thermal-sensor-charger {
++		compatible = "generic-adc-thermal";
++		#thermal-sensor-cells = <0>;
++		io-channels = <&adc 3>;
++		io-channel-names = "sensor-channel";
++		/* stock N950F NTC table (battery_data_greatlte_common.dtsi) */
++		temperature-lookup-table = <
++			(-20000) 3686 (-15000) 3575 (-10000) 3445 (-5000) 3293
++			0 3122 5000 2932 10000 2726 15000 2512
++			20000 2291 25000 2048 30000 1811 35000 1586
++			40000 1378 45000 1189 50000 1021 55000 887
++			60000 769 65000 655 70000 558 75000 474
++			80000 404 85000 345 90000 294>;
++	};
++
++	usb_ntc: thermal-sensor-usb {
++		compatible = "generic-adc-thermal";
++		#thermal-sensor-cells = <0>;
++		io-channels = <&adc 1>;
++		io-channel-names = "sensor-channel";
++		/* stock N950F NTC table (battery_data_greatlte_common.dtsi) */
++		temperature-lookup-table = <
++			(-20000) 3686 (-15000) 3575 (-10000) 3445 (-5000) 3293
++			0 3122 5000 2932 10000 2726 15000 2512
++			20000 2291 25000 2048 30000 1811 35000 1586
++			40000 1378 45000 1189 50000 1021 55000 887
++			60000 769 65000 655 70000 558 75000 474
++			80000 404 85000 345 90000 294>;
++	};
++
++	thermal-zones {
++		battery-thermal {
++			polling-delay-passive = <0>;
++			polling-delay = <5000>;
++			thermal-sensors = <&battery_ntc>;
++
++			trips {
++				battery-hot {
++					temperature = <60000>;
++					hysteresis = <2000>;
++					type = "hot";
++				};
++			};
++		};
++
++		charger-thermal {
++			polling-delay-passive = <0>;
++			polling-delay = <5000>;
++			thermal-sensors = <&charger_ntc>;
++
++			trips {
++				charger-hot {
++					temperature = <60000>;
++					hysteresis = <2000>;
++					type = "hot";
++				};
++			};
++		};
++
++		usb-thermal {
++			polling-delay-passive = <0>;
++			polling-delay = <5000>;
++			thermal-sensors = <&usb_ntc>;
++
++			trips {
++				usb-hot {
++					temperature = <60000>;
++					hysteresis = <2000>;
++					type = "hot";
++				};
++			};
++		};
++	};
++};
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+index b9330d628..f4283a33c 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+@@ -1820,6 +1820,16 @@ cmu_top: clock-controller@15a80000 {
+ 			clock-names = "oscclk";
+ 		};
+ 
++		adc: adc@15b70000 {
++			compatible = "samsung,exynos-adc-v3";
++			reg = <0x15b70000 0x100>;
++			interrupts = <GIC_SPI 104 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&cmu_busco CLK_GOUT_BUSC_ADCIF_PCLK>;
++			clock-names = "adc";
++			#io-channel-cells = <1>;
++			status = "disabled";
++		};
++
+ 		/*
+ 		 * SPEEDY (Serial Protocol in an EffEctive Digital waY) is a
+ 		 * Samsung proprietary serial bus; the S2MPS17 PMIC hangs off
+diff --git a/drivers/clk/samsung/clk-exynos8895.c b/drivers/clk/samsung/clk-exynos8895.c
+index 32ef583f1..f2c119fba 100644
+--- a/drivers/clk/samsung/clk-exynos8895.c
++++ b/drivers/clk/samsung/clk-exynos8895.c
+@@ -20,7 +20,7 @@
+ 
+ /* NOTE: Must be equal to the last clock ID increased by one */
+ #define CLKS_NR_TOP	(CLK_GOUT_CMU_VPU_BUS + 1)
+-#define CLKS_NR_BUSC	(CLK_GOUT_BUSC_SPEEDY_PCLK + 1)
++#define CLKS_NR_BUSC	(CLK_GOUT_BUSC_ADCIF_PCLK + 1)
+ #define CLKS_NR_G3D	(CLK_GOUT_G3D_AGPU + 1)
+ #define CLKS_NR_FSYS0	(CLK_GOUT_FSYS0_XIU_P_FSYS0_ACLK + 1)
+ #define CLKS_NR_FSYS1	(CLK_GOUT_FSYS1_XIU_P_FSYS1_ACLK + 1)
+@@ -1361,10 +1361,12 @@ CLK_OF_DECLARE(exynos8895_cmu_top, "samsung,exynos8895-cmu-top",
+ 
+ /* Register Offset definitions for CMU_BUSCO (0x15a00000) */
+ #define CLK_CON_DIV_DIV_CLK_BUSC_BUSP					0x1800
++#define CLK_CON_GAT_GOUT_BLK_BUSC_UID_ADCIF_BUSC_IPCLKPORT_PCLK_S0	0x2010
+ #define CLK_CON_GAT_GOUT_BLK_BUSC_UID_SPEEDY_IPCLKPORT_PCLK		0x2124
+ 
+ static const unsigned long busc_clk_regs[] __initconst = {
+ 	CLK_CON_DIV_DIV_CLK_BUSC_BUSP,
++	CLK_CON_GAT_GOUT_BLK_BUSC_UID_ADCIF_BUSC_IPCLKPORT_PCLK_S0,
+ 	CLK_CON_GAT_GOUT_BLK_BUSC_UID_SPEEDY_IPCLKPORT_PCLK,
+ };
+ 
+@@ -1379,6 +1381,10 @@ static const struct samsung_gate_clock busc_gate_clks[] __initconst = {
+ 	     "dout_busc_busp",
+ 	     CLK_CON_GAT_GOUT_BLK_BUSC_UID_SPEEDY_IPCLKPORT_PCLK,
+ 	     21, 0, 0),
++	GATE(CLK_GOUT_BUSC_ADCIF_PCLK, "gout_busc_adcif_pclk",
++	     "dout_busc_busp",
++	     CLK_CON_GAT_GOUT_BLK_BUSC_UID_ADCIF_BUSC_IPCLKPORT_PCLK_S0,
++	     21, 0, 0),
+ };
+ 
+ static const struct samsung_cmu_info busc_cmu_info __initconst = {
+diff --git a/drivers/iio/adc/exynos_adc.c b/drivers/iio/adc/exynos_adc.c
+index c1a0061b1..c9f3ebb72 100644
+--- a/drivers/iio/adc/exynos_adc.c
++++ b/drivers/iio/adc/exynos_adc.c
+@@ -46,6 +46,9 @@
+ #define ADC_V2_INT_ST(x)	((x) + 0x14)
+ #define ADC_V2_VER(x)		((x) + 0x20)
+ 
++/* ADC_V3 (Exynos 8895) keeps the V2 layout but moves the data register */
++#define ADC_V3_DAT(x)		((x) + 0x08)
++
+ /* Bit definitions for ADC_V1 */
+ #define ADC_V1_CON_RES		(1u << 16)
+ #define ADC_V1_CON_PRSCEN	(1u << 14)
+@@ -70,6 +73,7 @@
+ 
+ /* Bit definitions for ADC_V2 */
+ #define ADC_V2_CON1_SOFT_RESET	(1u << 2)
++#define ADC_V2_CON1_SOFT_NON_RESET	(1u << 1)
+ 
+ #define ADC_V2_CON2_OSEL	(1u << 10)
+ #define ADC_V2_CON2_ESEL	(1u << 9)
+@@ -78,6 +82,7 @@
+ #define ADC_V2_CON2_ACH_SEL(x)	(((x) & 0xF) << 0)
+ #define ADC_V2_CON2_ACH_MASK	0xF
+ 
++#define MAX_ADC_V3_CHANNELS		12
+ #define MAX_ADC_V2_CHANNELS		10
+ #define MAX_ADC_V1_CHANNELS		8
+ #define MAX_EXYNOS3250_ADC_CHANNELS	2
+@@ -126,6 +131,7 @@ struct exynos_adc_data {
+ 	int num_channels;
+ 	bool needs_sclk;
+ 	bool needs_adc_phy;
++	bool data_v3;
+ 	int phy_offset;
+ 	u32 mask;
+ 
+@@ -397,6 +403,31 @@ static const struct exynos_adc_data exynos7_adc_data = {
+ 	.start_conv	= exynos_adc_v2_start_conv,
+ };
+ 
++static void exynos_adc_v3_init_hw(struct exynos_adc *info)
++{
++	u32 con2;
++
++	writel(ADC_V2_CON1_SOFT_RESET, ADC_V2_CON1(info->regs));
++	writel(ADC_V2_CON1_SOFT_NON_RESET, ADC_V2_CON1(info->regs));
++
++	con2 = ADC_V2_CON2_C_TIME(6);
++	writel(con2, ADC_V2_CON2(info->regs));
++
++	/* Enable interrupts */
++	writel(1, ADC_V2_INT_EN(info->regs));
++}
++
++static const struct exynos_adc_data exynos_adc_v3_data = {
++	.num_channels	= MAX_ADC_V3_CHANNELS,
++	.mask		= ADC_DATX_MASK, /* 12 bit ADC resolution */
++	.data_v3	= true,
++
++	.init_hw	= exynos_adc_v3_init_hw,
++	.exit_hw	= exynos_adc_v2_exit_hw,
++	.clear_irq	= exynos_adc_v2_clear_irq,
++	.start_conv	= exynos_adc_v2_start_conv,
++};
++
+ static const struct of_device_id exynos_adc_match[] = {
+ 	{
+ 		.compatible = "samsung,s3c6410-adc",
+@@ -419,6 +450,9 @@ static const struct of_device_id exynos_adc_match[] = {
+ 	}, {
+ 		.compatible = "samsung,exynos7-adc",
+ 		.data = &exynos7_adc_data,
++	}, {
++		.compatible = "samsung,exynos-adc-v3",
++		.data = &exynos_adc_v3_data,
+ 	},
+ 	{ }
+ };
+@@ -487,7 +521,10 @@ static irqreturn_t exynos_adc_isr(int irq, void *dev_id)
+ 	u32 mask = info->data->mask;
+ 
+ 	/* Read value */
+-	info->value = readl(ADC_V1_DATX(info->regs)) & mask;
++	if (info->data->data_v3)
++		info->value = readl(ADC_V3_DAT(info->regs)) & mask;
++	else
++		info->value = readl(ADC_V1_DATX(info->regs)) & mask;
+ 
+ 	/* clear irq */
+ 	if (info->data->clear_irq)
+@@ -538,6 +575,8 @@ static const struct iio_chan_spec exynos_adc_iio_channels[] = {
+ 	ADC_CHANNEL(7, "adc7"),
+ 	ADC_CHANNEL(8, "adc8"),
+ 	ADC_CHANNEL(9, "adc9"),
++	ADC_CHANNEL(10, "adc10"),
++	ADC_CHANNEL(11, "adc11"),
+ };
+ 
+ static int exynos_adc_probe(struct platform_device *pdev)
+diff --git a/include/dt-bindings/clock/samsung,exynos8895.h b/include/dt-bindings/clock/samsung,exynos8895.h
+index 945e97b1e..c61ccf963 100644
+--- a/include/dt-bindings/clock/samsung,exynos8895.h
++++ b/include/dt-bindings/clock/samsung,exynos8895.h
+@@ -484,6 +484,7 @@
+ /* CMU_BUSCO */
+ #define CLK_DOUT_BUSC_BUSP		1
+ #define CLK_GOUT_BUSC_SPEEDY_PCLK	2
++#define CLK_GOUT_BUSC_ADCIF_PCLK	3
+ 
+ /* CMU_G3D */
+ #define CLK_FOUT_G3D_PLL		1
+-- 
+2.53.0
+

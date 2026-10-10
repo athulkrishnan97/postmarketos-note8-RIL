@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+
+description="Note 8 charging: USB PD 9 V, per-source current limits, battery temperature"
+command="/usr/libexec/greatlte-charging"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+
+depend() {
+	after sysfs modules
+}
+
+stop_post() {
+	# leave the charger at the safe USB default when the policy is not running
+	b=$(ls -d /sys/bus/i2c/devices/*-0069 2>/dev/null | head -1)
+	[ -n "$b" ] || return 0
+	b=$(basename "$b"); b=${b%-0069}
+	i2cset -y -f "$b" 0x69 0xc0 $(( ($(i2cget -y -f "$b" 0x69 0xc0) & 0x80) | 20 )) # 500 mA in
+	i2cset -y -f "$b" 0x69 0xb9 $(( ($(i2cget -y -f "$b" 0x69 0xb9) & 0xc0) | 10 )) # 500 mA charge
+	rm -f /run/greatlte-charging
+}

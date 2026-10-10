@@ -557,3 +557,24 @@ Plan: docs/RIL-PLAN.md. Test sequence for the phone: docs/RIL-BRINGUP.md.
 - Reference blobs: github.com/exynos8895/android_vendor_samsung_universal8895-common
   (lineage-18.1): vendor/bin/cbd, lib64/libsec-ril.so. cbd args from init.baseband.rc:
   cbd -d -tss310 -bm -mm -P platform/11120000.ufs/by-name/RADIO -n /efs
+
+## UPDATE 2026-10-10 (Claude, cloud session via CF tunnel -> laptop -> phone)
+- Access: cloud session -> `cloudflared access ssh` to ssh.oakdalehome.uk (laptop athul-g15)
+  -> ssh athul@172.16.42.1 (phone, USB). Up-to-date working tree on the laptop:
+  /home/athul/postmarketos/ (postmarketos-note8 = original repo; work/linux-7.0 = kernel
+  tree of the running #39 build). RIL work lives in github.com/athulkrishnan97/postmarketos-note8-ril.
+- Merged original master (USB PD charging = kernel r12) -> modem kernel is now r13; the
+  modem patch was regenerated on top of exynos8895-charging.patch and r13 builds.
+- Backups: work/modem-backup-20261010/ on the laptop (EFS, CPEFS, RADIO, CP_DEBUG,
+  PERSISTENT, PARAM, RECOVERY; SHA256SUMS verified). EFS has nv_data.bin (1 MiB) + .bak.
+- RADIO TOC: BOOT @0x40000000, MAIN @+0x10000 (0x24adeb8 B), VSS @+0x7a00000, NV @+0x5900000
+  (1 MiB) - matches the modem dtsi layout.
+- SYSTEM partition is EMPTY (only lost+found): no Android userspace on the phone. TWRP
+  (RECOVERY, Android 9 / SDK 28, LZMA ramdisk) sbin/ has linker64 + libc/libm/libdl/liblog/
+  libcutils/libc++/libbase/libutils/libz; all 90 symbols the lineage-18.1 cbd imports
+  resolve against them -> build the cbd chroot from TWRP instead of SYSTEM.
+- Plain non-secure reads of PMU CP_CTRL_NS (0x16480030) take a synchronous external abort
+  (oops in smcprobe init). Use the SMC path only (the driver already does under
+  CP_SECURE_BOOT).
+- SMC 0x82000700 READ_CTRL (smcprobe2) then froze the phone (no ping/ssh) - but the first,
+  oopsed module was still stuck "Loading" at the time. Retest from a clean boot pending.

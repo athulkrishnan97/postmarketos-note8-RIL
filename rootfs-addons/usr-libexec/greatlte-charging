@@ -1,0 +1,162 @@
+#!/bin/sh
+# greatlte-charging: input/charge current policy for the Galaxy Note 8.
+#
+# The mainline kernel has no driver for the S2MM005 USB-C/PD controller and
+# nothing sets the MAX77865 charger currents, which keep whatever the
+# bootloader picked at power-on (and keep them across re-plugs). This loop
+# checks the source about once a second and sets:
+#
+#   USB PD           ask for the highest fixed PDO up to 9 V; input current
+#                    min(PDO current, 15 W / V); charge current up to 2.35 A
+#   Type-C Rp 3 A    3 A in   (no PD contract)
+#   Type-C Rp 1.5 A  1.5 A in
+#   BC1.2 DCP        1.8 A in, 2.1 A charge (stock "TA")
+#   BC1.2 CDP        1.5 A in, 1.5 A charge
+#   USB port / other 500 mA in, 500 mA charge
+#   unplugged        500 mA / 500 mA, so the next plug starts safe
+#
+# and cuts the charge current on battery temperature like stock: 41 C ->
+# 1.15 A (back below 39 C), 50 C -> 100 mA, below 15 C -> 750 mA, below
+# 0 C -> 100 mA. Without a battery temperature it stays at 1.5 A / 1 A.
+# Stock values: battery_data_greatlte_common.dtsi; PDO select sequence:
+# drivers/ccic/s2mm005_pd.c (Samsung universal8895 kernel).
+
+TAG=greatlte-charging
+STATUS=/run/greatlte-charging
+
+find_bus() { # glob of an i2c adapter or client sysfs path
+	for p in $1; do [ -e "$p" ] && { basename "$p"; return; }; done
+}
+PD_BUS=$(find_bus '/sys/devices/platform/soc@0/*usi@10940000/10950000.i2c/i2c-*'); PD_BUS=${PD_BUS#i2c-}
+CHG_BUS=$(find_bus '/sys/bus/i2c/devices/*-0069'); CHG_BUS=${CHG_BUS%-0069}
+ONLINE=/sys/class/power_supply/max77865-charger/online
+TZ=
+for z in /sys/class/thermal/thermal_zone*; do
+	[ "$(cat $z/type 2>/dev/null)" = battery-thermal ] && TZ=$z/temp
+done
+
+if [ -z "$CHG_BUS" ] || [ ! -e "$ONLINE" ]; then
+	logger -t $TAG "MAX77865 charger not found, exiting"; exit 1
+fi
+[ -n "$PD_BUS" ] || logger -t $TAG "S2MM005 bus not found, USB PD disabled"
+[ -n "$TZ" ] || logger -t $TAG "battery-thermal zone not found, conservative limits"
+
+pd_read() { # reg_hi reg_lo bytes -> little-endian 32-bit words
+	set -- $(i2ctransfer -y $PD_BUS w2@0x33 $1 $2 r$3 2>/dev/null)
+	w=
+	while [ $# -ge 4 ]; do
+		w="$w $(( $1 | ($2 << 8) | ($3 << 16) | ($4 << 24) ))"
+		shift 4
+	done
+	echo $w
+}
+
+pd_select() { # PDO number, as stock s2mm005_select_pdo()
+	i2ctransfer -y $PD_BUS w5@0x33 0x00 0x10 0x03 0x03 $1 &&
+	i2ctransfer -y $PD_BUS w5@0x33 0x00 0x10 0x03 0x02 0x11 # PE_SNK_Wait_for_Capabilities
+}
+
+set_reg() { # reg value_bits field_mask
+	old=$(i2cget -y -f $CHG_BUS 0x69 $1) || return 1
+	new=$(( (old & ~$3 & 0xff) | $2 ))
+	[ $new -eq $((old)) ] || i2cset -y -f $CHG_BUS 0x69 $1 $new
+}
+
+apply() { # input_mA charge_mA
+	set_reg 0xc0 $(( $1 / 25 )) 0x7f	# CNFG_09 CHGIN_ILIM, 25 mA steps
+	set_reg 0xb9 $(( $2 / 50 )) 0x3f	# CNFG_02 CHG_CC, 50 mA steps
+}
+
+min() { [ $1 -lt $2 ] && echo $1 || echo $2; }
+
+last=; tries=0; hot=0; cold=0; hold=0; pd_mv=5000; snk_at=0
+while :; do
+	src=none; mv=5000; in=500; cc=500; pdos=; cur=0; rp=0; chgtyp=0
+
+	if [ "$(cat $ONLINE 2>/dev/null)" = 1 ]; then
+		src=usb
+		func=; [ -n "$PD_BUS" ] && func=$(pd_read 0x00 0x20 4)
+		if [ -n "$func" ] && [ $(( func & 0xff )) -eq 21 ]; then
+			# PE_SNK_Ready: a PD contract. Caps at 0x0260, request at 0x0240.
+			set -- $(pd_read 0x02 0x40 8); req=${2:-0}; cur=$(( (req >> 28) & 7 ))
+			set -- $(pd_read 0x02 0x60 32); hdr=${1:-0}; [ $# -gt 0 ] && shift
+			n=$(( (hdr >> 12) & 7 )); best=1; best_mv=0; i=1; cur_mv=5000; cur_ma=0
+			for w in "$@"; do
+				[ $i -gt $n ] && break
+				case $(( (w >> 30) & 3 )) in
+				3) pdos="$pdos pps:$(( ((w >> 8) & 0xff) * 100 ))-$(( ((w >> 17) & 0xff) * 100 )):$(( (w & 0x7f) * 50 ))" ;;
+				0) pdos="$pdos $(( ((w >> 10) & 0x3ff) * 50 )):$(( (w & 0x3ff) * 10 ))" ;;
+				*) pdos="$pdos other" ;;
+				esac
+				if [ $(( (w >> 30) & 3 )) -eq 0 ]; then	# fixed supply
+					v=$(( ((w >> 10) & 0x3ff) * 50 )); a=$(( (w & 0x3ff) * 10 ))
+					if [ $v -le 9000 ] && [ $v -ge $best_mv ]; then best=$i; best_mv=$v; fi
+					[ $i -eq $cur ] && { cur_mv=$v; cur_ma=$a; }
+				fi
+				i=$((i + 1))
+			done
+			src=pd; mv=$cur_mv
+			[ $cur_ma -gt 0 ] || cur_ma=500
+			in=$(min $cur_ma $(( 15000000 / cur_mv ))); in=$(min $in 3000)
+			if [ $cur -ne $best ] && [ $tries -lt 3 ]; then
+				tries=$((tries + 1))
+				logger -t $TAG "PD: requesting PDO$best ($best_mv mV), now PDO$cur"
+				pd_select $best
+			fi
+			pd_mv=$mv; hold=0
+		elif [ $pd_mv -gt 5000 ] && [ $hold -lt 5 ]; then
+			# a high-voltage contract just went away (renegotiation or
+			# hard reset): keep the last limits briefly rather than
+			# applying 5 V Type-C/BC1.2 currents at a higher VBUS
+			hold=$((hold + 1)); sleep 1; continue
+		else
+			pd_mv=5000
+			[ -n "$func" ] && rp=$(( (func >> 27) & 3 ))
+			chgtyp=$(( $(i2cget -y -f $CHG_BUS 0x25 0x0d 2>/dev/null || echo 0) & 3 ))
+			case "$rp:$chgtyp" in
+			3:*) src=typec-3a; in=3000 ;;
+			2:*) src=typec-1.5a; in=1500 ;;
+			*:3) src=dcp; in=1800; cc=2100 ;;
+			*:2) src=cdp; in=1500; cc=1500 ;;
+			*) src=sdp; in=500; cc=500 ;;
+			esac
+		fi
+		case $src in pd|typec-*) cc=$(min 2350 $(( mv * in * 9 / 10 / 4350 ))) ;; esac
+	else
+		tries=0; pd_mv=5000; hold=0
+		# A dual-role partner (e.g. a laptop's USB-C port) can leave the
+		# S2MM005 attached as the power source, but there is no VBUS boost
+		# (OTG) on mainline, so nothing flows. Put it back to sink like
+		# stock s2mm005_rprd_mode_change(TYPE_C_ATTACH_UFP).
+		func=; [ -n "$PD_BUS" ] && func=$(pd_read 0x00 0x20 4)
+		if [ -n "$func" ] && [ $(( (func >> 24) & 3 )) -eq 3 ] && [ $(( $(date +%s) - snk_at )) -ge 10 ]; then
+			logger -t $TAG "USB-C attached as power source (no OTG): forcing sink"
+			i2ctransfer -y $PD_BUS w4@0x33 0x00 0x10 0x03 0x12	# detach
+			sleep 1
+			i2ctransfer -y $PD_BUS w4@0x33 0x00 0x10 0x03 0x14	# sink
+			snk_at=$(date +%s)
+		fi
+	fi
+
+	# battery temperature (millidegrees C)
+	t=; [ -n "$TZ" ] && t=$(cat $TZ 2>/dev/null)
+	if [ -z "$t" ]; then
+		in=$(min $in 1500); cc=$(min $cc 1000); tc=unknown
+	else
+		tc=$(( t / 1000 ))
+		[ $t -ge 41000 ] && hot=1; [ $t -lt 39000 ] && hot=0
+		[ $t -lt 15000 ] && cold=1; [ $t -ge 20000 ] && cold=0
+		[ $hot = 1 ] && cc=$(min $cc 1150)
+		[ $cold = 1 ] && cc=$(min $cc 750)
+		{ [ $t -ge 50000 ] || [ $t -lt 0 ]; } && cc=100
+	fi
+
+	apply $in $cc
+	state="$src ${mv}mV in=${in}mA charge=${cc}mA battery=${tc}C"
+	[ "$state" != "$last" ] && { logger -t $TAG "$state"; last=$state; }
+	# for the `charger` command (key=value, readable without root)
+	printf 'source=%s\nvbus_mv=%s\ninput_limit_ma=%s\ncharge_limit_ma=%s\nbattery_c=%s\npdos="%s"\npdo_selected=%s\nrp=%s\nbc12=%s\nupdated=%s\n' \
+		"$src" "$mv" "$in" "$cc" "$tc" "${pdos# }" "$cur" "$rp" "$chgtyp" "$(date +%s)" > $STATUS.tmp &&
+		mv $STATUS.tmp $STATUS
+	sleep 1
+done

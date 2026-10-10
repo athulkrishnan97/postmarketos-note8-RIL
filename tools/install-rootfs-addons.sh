@@ -56,9 +56,18 @@ cp -a "$ADDONS/usr-share-alsa-ucm2/." "$MNT/usr/share/alsa/ucm2/"
 # PulseAudio: start on the bottom speaker, not the last saved default
 install -D -m 644 "$ADDONS/etc-pulse-default.pa.d/greatlte-speaker.pa" \
 	"$MNT/etc/pulse/default.pa.d/greatlte-speaker.pa"
+# ...and again after login: callaudiod makes the card's first sink (Earpiece) default
+install -D -m 755 "$ADDONS/usr-libexec/greatlte-speaker-default" "$MNT/usr/libexec/greatlte-speaker-default"
+install -D -m 644 "$ADDONS/etc-xdg-autostart/greatlte-speaker-default.desktop" \
+	"$MNT/etc/xdg/autostart/greatlte-speaker-default.desktop"
+
+# Charging: USB PD 9 V, per-source current limits, battery temperature
+install -m 755 "$ADDONS/etc-init.d/greatlte-charging" "$MNT/etc/init.d/greatlte-charging"
+install -D -m 755 "$ADDONS/usr-libexec/greatlte-charging" "$MNT/usr/libexec/greatlte-charging"
+install -D -m 755 "$ADDONS/usr-local-bin/charger" "$MNT/usr/local/bin/charger"
 
 # zram swap (lzo-rle) and the swap file behind it are sized from deviceinfo
-for s in g3d hciattach local postmarketos-zram-swap swapfile; do
+for s in g3d hciattach local postmarketos-zram-swap swapfile greatlte-charging; do
 	ln -sf "/etc/init.d/$s" "$MNT/etc/runlevels/default/$s"
 done
 

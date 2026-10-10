@@ -48,8 +48,8 @@ the uniLoader board files, and the phone-side runtime addons.
 | USB | **Device mode, USB 2.0 high speed**: DWC3 + an 8895 variant of the mainline Exynos USB PHY driver. postmarketOS's USB network (CDC NCM) works, so `ssh user@172.16.42.1` over the cable (~30 MB/s). A small MAX77865 MUIC driver routes D+/D- to the SoC, so it also works with the cable attached at boot. |
 | SSH | over WiFi, USB (172.16.42.1) or the Bluetooth PAN link |
 | MTP | `usb-mode mtp` switches the USB gadget to MTP (`umtprd` via postmarketOS's usb-signaller): the phone's `/home` appears as "Home" in Dolphin/Files, ~14 MB/s each way. `usb-mode developer` switches back to USB networking (SSH); only one mode at a time. |
-| Battery level | MAX77865 fuel gauge via the mainline `max17042_battery` driver (new `maxim,max77865-battery` compatible): percentage, voltage, current, temperature, capacity and cycle count in Plasma/UPower. |
-| Charging | ~1 A from USB. A small MAX77865 charger driver services the charge watchdog the bootloader leaves on (otherwise charging stops ~3 min after boot) and reports the charger to Plasma. Current limits are the bootloader's. |
+| Battery level | MAX77865 fuel gauge via the mainline `max17042_battery` driver (new `maxim,max77865-battery` compatible): percentage, voltage, current, capacity and cycle count in Plasma/UPower. The gauge's own temperature is a fixed 25 °C; the real battery, charger and USB-connector temperatures come from the NTC thermistors on the SoC ADC (`battery-thermal`, `charger-thermal`, `usb-thermal` thermal zones, stock lookup table). |
+| Charging | **USB PD fast charging** (9 V, 15 W like stock: ~2.4 A into the battery) plus per-source limits for everything else. The `greatlte-charging` service reads the S2MM005 USB-C/PD controller and the MUIC's BC1.2 detection about once a second: PD chargers get the highest offer up to 9 V; Type-C 3 A / 1.5 A sources and BC1.2 chargers (1.8 A in) get what they advertise; plain USB ports stay at 500 mA; unplugging resets to 500 mA. Charge current is cut on battery temperature like stock (41 °C → 1.15 A, 50 °C → stop, cold limits). Type **`charger`** in a terminal for a live view (source, negotiated voltage, the charger's offers, battery voltage/current/watts and temperatures). A small MAX77865 charger driver services the charge watchdog the bootloader leaves on (otherwise charging stops ~3 min after boot). Samsung AFC (9 V over D+/D−) is not supported. |
 | Audio | **Bottom loudspeaker** (default output) and **earpiece** (top receiver) for media and system sound through PulseAudio/Plasma, volume keys included. The speaker is a MAX98506 amplifier (new mainline driver) on ABOX UAIF4, whose pins are `gph3-0..3`; it plays at 48 kHz at the stock +13 dB gain, and PulseAudio does its volume in software (the amp mutes briefly on every gain change). A new mainline **ABOX** driver boots Samsung's Calliope firmware on the audio subsystem's Cortex-A7 and streams over UAIF0 to the **CS47L93** codec (madera driver, I2S provider, FLL from the 26 MHz PMU clock output). Capture path works (loopback-verified). ALSA UCM profile in `rootfs-addons/`; earpiece volume capped at −6 dB where it starts to distort. Headphone jack routed but untested (no jack detection yet). |
 | Screen off | The power button turns the panel off (display off + sleep in) and back on. Tap-to-wake is KWin's `DoubleTapWakeup` (`~/.config/kwinrc`, `[Wayland]`); set it to `false` to wake only with the power button. |
 | Memory / swap | 5.5 GB usable RAM; zram swap (lzo-rle, 150 % of RAM, priority 300) backed by a 10 GB swap file (priority 100). The kernel has only the LZO zram backend, so deviceinfo sets the algorithm (the zstd default left zram off). On a small microSD, lower `swap_size` in `/etc/conf.d/swapfile`. |
@@ -106,6 +106,8 @@ aports/                 postmarketOS device packages (build these with pmbootstr
                                    UAIF4 speaker path, DMA position fix, dts),
                                    exynos8895-cpu-stock-volts.patch (stock CPU
                                    voltages + 25 mV, throttling from 95 °C),
+                                   exynos8895-charging.patch (SoC ADC + battery/
+                                   charger/USB NTC thermal zones, S2MM005 bus),
                                    exynos8895-modem.patch (Shannon CP modem
                                    interface: Samsung modem_v1 ported, under test)
   device-samsung-greatlte/         device package (device info, zram/swap settings)
@@ -114,7 +116,12 @@ uniloader-files/        our uniLoader board port (2 files; applied onto upstream
 rootfs-addons/          files to install into the phone rootfs
   etc-init.d/g3d                    brings panfrost up before the display manager
   etc-init.d/hciattach              Bluetooth UART attach (BCM4361, 3 Mbaud)
+  etc-init.d/greatlte-charging      charging policy service (runs usr-libexec/greatlte-charging)
+  usr-libexec/greatlte-charging     USB PD 9 V request, per-source current limits, temperature cutback
+  usr-libexec/greatlte-speaker-default  speaker as default output after login (callaudiod picks the earpiece)
+  etc-xdg-autostart/                runs greatlte-speaker-default at login
   etc-umtprd/umtprd.conf            MTP: /home as "Home", files owned by uid 10000
+  usr-local-bin/charger             live charger/battery view (`charger`, `charger -1`)
   usr-local-bin/usb-mode            switch USB mode (developer / mtp / tethering / charging)
   etc-xdg-plasma-workspace-env/     Qt glyph cache workaround (testing, see BRINGUP 23)
   etc-NetworkManager-dispatcher.d/60-appstream  fetch Discover's catalogues (Alpine + Flathub) once online
@@ -137,7 +144,7 @@ docs/BRINGUP.md         the full technical journey: every root cause we hit
                         (section 15: display, GPU clock, CPU clusters)
 docs/HANDOVER.md        running handover notes between agents (state, lessons, open items)
 docs/RIL-PLAN.md        plan for the modem (Shannon 355 CP) and RIL bring-up
-docs/RIL-BRINGUP.md     modem test sequence on the phone (kernel r12 + tools/modem)
+docs/RIL-BRINGUP.md     modem test sequence on the phone (kernel r13 + tools/modem)
 ```
 
 ## Quick start (prebuilt release)

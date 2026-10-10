@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Default audio output: speaker
+Comment=Galaxy Note 8: use the bottom speaker, not the earpiece, after login
+Exec=/usr/libexec/greatlte-speaker-default
+NoDisplay=true
+X-KDE-autostart-phase=2

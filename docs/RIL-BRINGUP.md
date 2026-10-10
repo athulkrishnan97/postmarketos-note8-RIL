@@ -49,7 +49,7 @@ unchanged and prints the monitor's answer.
 
 ## 2. Kernel with the modem driver
 
-Flash a boot image built from kernel r12 (with `exynos8895-modem.patch`).
+Flash a boot image built from kernel r13 (with `exynos8895-modem.patch`).
 After boot:
 
 ```sh

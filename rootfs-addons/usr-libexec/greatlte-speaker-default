@@ -1,0 +1,22 @@
+#!/bin/sh
+# greatlte-speaker-default: make the bottom speaker the default output once
+# the session's audio is up.
+#
+# callaudiod (D-Bus activated at login by the Plasma telephony daemon)
+# makes the first sink of the sound card the default when it starts
+# (cad-pulse.c, init_sink_info), and PulseAudio creates the Earpiece sink
+# first. That runs after /etc/pulse/default.pa.d/greatlte-speaker.pa, so
+# wait for callaudiod to settle and set the Speaker sink again, once.
+SINK=alsa_output.platform-sound.HiFi__Speaker__sink
+
+i=0
+while [ $i -lt 120 ] && ! pgrep -x -u "$(id -u)" callaudiod >/dev/null; do
+	sleep 1; i=$((i + 1))
+done
+sleep 3
+i=0
+until pactl list short sinks 2>/dev/null | grep -q "$SINK"; do
+	[ $i -ge 30 ] && exit 1
+	sleep 1; i=$((i + 1))
+done
+pactl set-default-sink "$SINK"
