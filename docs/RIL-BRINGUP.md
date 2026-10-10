@@ -19,6 +19,12 @@
 > `mifmon`): it defines and activates context 1 over Samsung IPC and
 > configures rmnet0 from the CP's IP configuration. An AT-activated context is
 > not routed to rmnet; only the IPC path is. See step 6.
+>
+> **Update 2: RFS answered, one command for everything.** The CP's file/NV
+> requests (RFS) must be answered or its AT interface stalls after a CP boot.
+> Start `mifmon -r -d -s /usr/local/bin/rmnet-up` *before* cbd: it answers RFS
+> (NV data in EFS), attaches over AT, sets up the data call over IPC and redoes
+> it whenever the CP reboots. The services do this in that order.
 
 Companion to [RIL-PLAN.md](RIL-PLAN.md). Kernel side: `exynos8895-modem.patch`
 (Samsung's `modem_v1` interface driver, ported to 7.0) plus the modem nodes
@@ -161,13 +167,17 @@ DEFINE_PDP_CONTEXT, PS attach and PDP_CONTEXT activate, then runs the hook
 with the address the CP reports:
 
 ```sh
-# once per boot, while LTE is searching (no initial-attach context yet)
-printf 'AT+CGDCONT=1,"IPV4V6",""\r' > /dev/umts_router
-printf 'AT+CGATT=1\r' > /dev/umts_router
-# the data call (replaces plain mifmon; only one reader of umts_ipc0 allowed)
-sudo mifmon -d -s /usr/local/bin/rmnet-up      # -A <apn> -c <cid> if needed
+# start before cbd; replaces plain mifmon (only one reader of umts_ipc0)
+sudo mifmon -r -d -s /usr/local/bin/rmnet-up   # -A <apn> -c <cid> if needed
+# (then start cbd)
 ping -I rmnet0 1.1.1.1
 ```
+
+mifmon sends `AT+CGDCONT` + `AT+CGATT=1` itself (the CP does not attach to
+LTE without an initial-attach context), then the IPC define/activate.
+
+As services: `MIFMON_DATA=yes` in `/etc/conf.d/modem-ipc`, then
+`rc-service modem-ipc start; rc-service cbd start`.
 
 `rmnet-up` adds a default route with metric 700 (Wi-Fi/USB stay preferred;
 `RMNET_METRIC=0` to prefer mobile data) and writes the operator's DNS to

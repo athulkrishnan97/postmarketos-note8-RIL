@@ -706,3 +706,31 @@ SIM (Lidl Connect IE) inserted, same v186 boot, cbd + mifmon running.
   frames: reads are 64 KiB-chunked), attach without AT (send DEFINE before attach at boot -
   untested whether the CP then attaches by itself), ModemManager integration, SMS/voice (IMS),
   exact clocks behind clk_ignore_unused.
+
+## 2026-10-10 ~12:15 RFS SERVER: AT NO LONGER STALLS, DATA FROM A COLD MODEM BOOT
+- After two modem restarts AT on umts_router went silent (writes OK, no replies; the CP kept
+  sending FMT). Cause: unanswered RFS requests. Right after each CP boot it sends RFS OPEN
+  requests and two NV writes; the AT interface stalls until they are answered. (The first
+  session worked by luck of timing.)
+- RFS protocol decoded from the stock libsec-ril (Nv::ProcessRfsPacket/ProcessRfsMessage and
+  the Nv::Process* handlers); table in the header comment of tools/modem/mifmon.c. Highlights:
+  frame = u32 len (whole frame, reassembled over reads, max 512 KiB), u8 cmd, u8 id; replies
+  echo cmd/id. 01/02 NV read/write on /efs/nv_data.bin (offsets as given); after each write
+  nv_data.bin.md5 = hex MD5(nv_data.bin + "Samsung_Android_RIL") (verified on the device's
+  own nv_data.bin.md5 and .nv_data.bak.md5). File ops on /efs/root/<path> (stock), Linux
+  open flags, replies carry fd/ret + errno. Unknown commands get -1/ENOSYS.
+- What the CP asks at boot: OPEN "\x01" and OPEN "CP_AUDIO_SLSI.bin" (both ENOENT; the stock
+  system/etc has neither file either), CLOSE x2, NV_WRITE 101132 bytes @0x80000 and
+  ~18.6 KB @0x0 (the CP syncing its NV; ~15 KB of nv_data.bin changed vs the backup -
+  expected). Backup of the pre-RFS NV on the phone: /root/nv-backup-202610101207/
+  (plus the full EFS image on the laptop, work/modem-backup-20261010).
+- `mifmon -r` answers RFS (EFS root via -e, default /var/lib/android-modem/efs). With RFS
+  answered, AT replies are immediate after a fresh CP boot.
+- `mifmon -d` now does the whole data bring-up itself: AT+CGDCONT + AT+CGATT=1 (retried),
+  then IPC define + activate, then the hook. IPC PS attach (0d03) dropped: on its own it
+  does not attach. The sequence restarts on PWR_PHONE_PWR_UP (01 01 NOTI, sent at every CP
+  boot - the misc devices give no HUP on a CP restart) and on a call drop.
+- Tested from a cold CP start: `mifmon -r -d -s rmnet-up` started first, then cbd ->
+  PWR_UP -> RFS NV writes answered -> CGDCONT OK -> CGATT OK (~5 s) -> 0d01/0d04 0x8000 ->
+  IP config -> rmnet0 up -> ping OK. Services reordered accordingly (modem-ipc before cbd,
+  -r by default).

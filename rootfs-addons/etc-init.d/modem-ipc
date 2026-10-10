@@ -1,8 +1,10 @@
 #!/sbin/openrc-run
-# Modem bring-up placeholder for the RIL: holds /dev/umts_ipc0 and
+# Minimal RIL side for the Shannon CP (mifmon): holds /dev/umts_ipc0 and
 # /dev/umts_rfs0 open (the kernel only completes the CP handshake with
-# CMD_INIT_END while both are open) and logs every IPC/RFS frame to
-# /var/log/mifmon.log. Replaced by a real RIL once one exists.
+# CMD_INIT_END while both are open), answers the CP's RFS requests (NV data
+# and files on EFS; without answers the CP's AT interface stalls) and logs
+# every IPC/RFS frame to /var/log/mifmon.log. Starts before cbd so the
+# first RFS requests after a CP boot are answered.
 #
 # MIFMON_DATA=yes in /etc/conf.d/modem-ipc also brings up mobile data on
 # rmnet0 (mifmon -d, configured by /usr/local/bin/rmnet-up); MIFMON_APN sets
@@ -11,13 +13,20 @@
 description="Shannon CP IPC monitor (mifmon)"
 
 command=/usr/local/bin/mifmon
+command_args="-r -e ${ROOT:-/var/lib/android-modem}/efs"
 if [ "${MIFMON_DATA:-no}" = yes ]; then
-	command_args="-d -s /usr/local/bin/rmnet-up -A '${MIFMON_APN:-}'"
+	command_args="$command_args -d -s /usr/local/bin/rmnet-up -A '${MIFMON_APN:-}'"
 fi
 supervisor=supervise-daemon
 output_log=/var/log/mifmon.log
 error_log=/var/log/mifmon.log
 
 depend() {
-	after cbd
+	need localmount
+	before cbd
+}
+
+start_pre() {
+	# EFS must be mounted where the RFS answers go
+	/usr/local/bin/android-env up
 }

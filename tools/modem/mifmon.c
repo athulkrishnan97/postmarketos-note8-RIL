@@ -6,13 +6,15 @@
  * only while both /dev/umts_ipc0 (FMT: Samsung IPC) and /dev/umts_rfs0
  * (RFS: remote file system) are open, so this tool also acts as the
  * "RIL is up" placeholder during bring-up. Every frame is printed with a
- * timestamp and the decoded header; nothing is answered yet.
+ * timestamp and the decoded header; with -r/-d it also answers the CP.
  *
  *   mifmon                     log umts_ipc0 + umts_rfs0 (+ umts_router)
  *   mifmon -a 'AT+CPIN?'       also send an AT command on umts_router
  *   mifmon -f <hex bytes>      also send a raw FMT frame on umts_ipc0
  *   mifmon -d [-c cid] [-A apn] [-s hook]
  *                              also bring up a data call (see below)
+ *   mifmon -r [-e efs-dir]     also answer the CP's RFS (file/NV) requests
+ *                              (default /var/lib/android-modem/efs)
  *
  * Only one process may read umts_ipc0: a second reader steals the CP's
  * replies. So the data call is set up from here rather than by a separate
@@ -21,7 +23,8 @@
  * Data call (decoded from the stock libsec-ril, IpcProtocol41):
  *   GPRS_DEFINE_PDP_CONTEXT 0d 01 SET: u8 1, u8 cid, u8 pdp_type,
  *       char apn[100], ... (134 bytes in all)
- *   GPRS_PS (attach)        0d 03 SET: u8 1, u8 0, u8 0 (10 bytes)
+ *   GPRS_PS (attach)        0d 03 SET: u8 1, u8 0, u8 0 (10 bytes; not
+ *       enough on its own, the attach is done with AT+CGATT instead)
  *   GPRS_PDP_CONTEXT        0d 04 SET: u8 1 (activate) / 0, u8 cid, ...
  *       (112 bytes)
  * The CP answers each with GEN_PHONE_RES (80 01, code 0x8000 = OK), then
@@ -45,6 +48,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -180,17 +184,484 @@ static size_t parse_hex(const char *s, uint8_t *out, size_t max)
 	return n;
 }
 
+/* --- RFS server --------------------------------------------------------- */
+
+/*
+ * The CP keeps its NV data and a few files on the AP (EFS) and asks for
+ * them over umts_rfs0. Decoded from the stock libsec-ril (Nv::Process*).
+ * All integers little endian; every frame starts u32 len (whole frame),
+ * u8 cmd, u8 id; the reply echoes cmd and id. A frame can span several
+ * reads (reassembled by len, at most 512 KiB).
+ *
+ *   01 NV_READ   req: u32 off, u32 len
+ *                rep: u8 ok, u32 off, u32 len, data            (15 + len)
+ *   02 NV_WRITE  req: u32 off, u32 len, data
+ *                rep: u8 ok, u32 off, u32 len                  (15)
+ *        nv_data.bin, then nv_data.bin.md5 = hex MD5(file + secret)
+ *   03 READ      req: s32 fd, u32 len
+ *                rep: s32 n, s32 errno, data                   (14 + n)
+ *   04 WRITE     req: s32 fd, u32 len, data   rep: s32 n, s32 errno
+ *   05 LSEEK     req: s32 fd, s32 off, s32 whence
+ *                rep: u32 0, s32 ret, s32 errno                (18)
+ *   06 CLOSE     req: s32 fd                  rep: s32 ret, s32 errno
+ *   0a GET_FILE_INFO      req: u32 plen, path
+ *   13 GET_HANDLE_INFO    req: s32 fd
+ *                rep: s32 ret, u16 type (1 dir, 2 file), u32 size,
+ *                     ctime[6], mtime[6] (yy-2000 mon day h m s),
+ *                     s32 errno                                (32)
+ *   0b DELETE / 0c MKDIR / 14 CREATE   req: u32 plen, path
+ *                rep: s32 ret (fd for CREATE), s32 errno       (14)
+ *   11 OPEN      req: s32 flags (Linux O_*), u32 plen, path
+ *                rep: s32 fd, s32 errno                        (14)
+ * Others (07 PUT_FILE, 08 GET_FILE, 09 RENAME, 15-17 NV write-all/buffer/
+ * restore) are answered with ret -1, ENOSYS and logged.
+ *
+ * Paths: no ".." components; "err..." and "/data/log..." go to the log
+ * directory, Audio_OEM/Audio_IFX/CP_AUDIO_SLSI/RF_NVM... to system/etc of
+ * the Android root (read-only CP config), everything else to
+ * <efs>/root/<path> (stock: /efs/root).
+ */
+
+#define RFS_MAX		(512 * 1024)
+#define NV_SECRET	"Samsung_Android_RIL"
+
+static struct {
+	int fd;
+	const char *efs;	/* EFS mount point */
+	uint8_t *buf;		/* reassembly buffer */
+	size_t have, want;
+} rfs;
+
+static uint32_t get32(const uint8_t *p)
+{
+	return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static void put32(uint8_t *p, uint32_t v)
+{
+	p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24;
+}
+
+static void rfs_reply(uint8_t *r, size_t n, uint8_t cmd, uint8_t id)
+{
+	put32(r, n);
+	r[4] = cmd;
+	r[5] = id;
+	if (write(rfs.fd, r, n) != (ssize_t)n)
+		perror("mifmon: write umts_rfs0");
+}
+
+/* 14-byte reply: s32 ret, s32 errno */
+static void rfs_reply_ret(uint8_t cmd, uint8_t id, int ret, int err)
+{
+	uint8_t r[14] = { 0 };
+
+	put32(r + 6, ret);
+	put32(r + 10, ret < 0 ? err : 0);
+	rfs_reply(r, sizeof(r), cmd, id);
+	stamp();
+	printf("RFS 0x%02x id=%u -> ret=%d errno=%d\n", cmd, id, ret,
+	       ret < 0 ? err : 0);
+}
+
+/* CP path -> AP path; NULL if rejected */
+static char *rfs_path(const uint8_t *p, size_t plen, size_t room)
+{
+	char cp[1024], tmp[1024], *tok, *save;
+	char *out;
+
+	if (plen > room)
+		plen = room;
+	if (plen >= sizeof(cp))
+		plen = sizeof(cp) - 1;
+	memcpy(cp, p, plen);
+	cp[plen] = 0;
+
+	strcpy(tmp, cp);
+	for (tok = strtok_r(tmp, "/", &save); tok; tok = strtok_r(NULL, "/", &save))
+		if (!strcmp(tok, ".."))
+			return NULL;
+
+	out = malloc(2048);
+	if (!out)
+		return NULL;
+	if (!strncmp(cp, "err", 3) || !strncmp(cp, "/data/log", 9))
+		snprintf(out, 2048, "%s/../data/log/%s", rfs.efs, cp);
+	else if (!strncmp(cp, "Audio_OEM", 9) || !strncmp(cp, "Audio_IFX", 9) ||
+		 !strncmp(cp, "CP_AUDIO_SLSI", 13) || !strncmp(cp, "RF_NVM", 6) ||
+		 !strncmp(cp, "CP_OMC_AUDIO_SLSI", 17))
+		snprintf(out, 2048, "%s/../system/etc/%s", rfs.efs, cp);
+	else
+		snprintf(out, 2048, "%s/root/%s", rfs.efs, cp);
+	return out;
+}
+
+/* mkdir -p for the parent directory of path */
+static void rfs_mkparents(const char *path)
+{
+	char d[2048], *s;
+
+	snprintf(d, sizeof(d), "%s", path);
+	for (s = d + 1; *s; s++) {
+		if (*s != '/')
+			continue;
+		*s = 0;
+		mkdir(d, 0775);
+		*s = '/';
+	}
+}
+
+/* Minimal MD5 (RFC 1321) for the NV checksum */
+struct md5 {
+	uint32_t h[4];
+	uint64_t len;
+	uint8_t blk[64];
+};
+
+static void md5_block(struct md5 *m, const uint8_t *p)
+{
+	static const uint32_t k[64] = {
+		0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a,
+		0xa8304613, 0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be,
+		0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340,
+		0x265e5a51, 0xe9b6c7aa, 0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+		0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed, 0xa9e3e905, 0xfcefa3f8,
+		0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c,
+		0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
+		0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+		0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92,
+		0xffeff47d, 0x85845dd1, 0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1,
+		0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+	};
+	static const uint8_t r[16] = { 7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23,
+				       6, 10, 15, 21 };
+	uint32_t a = m->h[0], b = m->h[1], c = m->h[2], d = m->h[3], w[16], f, t;
+	int i, g;
+
+	for (i = 0; i < 16; i++)
+		w[i] = get32(p + 4 * i);
+	for (i = 0; i < 64; i++) {
+		if (i < 16) { f = (b & c) | (~b & d); g = i; }
+		else if (i < 32) { f = (d & b) | (~d & c); g = (5 * i + 1) & 15; }
+		else if (i < 48) { f = b ^ c ^ d; g = (3 * i + 5) & 15; }
+		else { f = c ^ (b | ~d); g = (7 * i) & 15; }
+		t = d;
+		d = c;
+		c = b;
+		f += a + k[i] + w[g];
+		b += f << r[(i >> 4) * 4 + (i & 3)] | f >> (32 - r[(i >> 4) * 4 + (i & 3)]);
+		a = t;
+	}
+	m->h[0] += a; m->h[1] += b; m->h[2] += c; m->h[3] += d;
+}
+
+static void md5_init(struct md5 *m)
+{
+	m->h[0] = 0x67452301; m->h[1] = 0xefcdab89;
+	m->h[2] = 0x98badcfe; m->h[3] = 0x10325476;
+	m->len = 0;
+}
+
+static void md5_update(struct md5 *m, const uint8_t *p, size_t n)
+{
+	while (n--) {
+		m->blk[m->len++ & 63] = *p++;
+		if (!(m->len & 63))
+			md5_block(m, m->blk);
+	}
+}
+
+static void md5_hex(struct md5 *m, char out[33])
+{
+	uint64_t bits = m->len * 8;
+	uint8_t pad = 0x80, z = 0, l[8];
+	int i;
+
+	md5_update(m, &pad, 1);
+	while ((m->len & 63) != 56)
+		md5_update(m, &z, 1);
+	for (i = 0; i < 8; i++)
+		l[i] = bits >> (8 * i);
+	md5_update(m, l, 8);
+	for (i = 0; i < 16; i++)
+		sprintf(out + 2 * i, "%02x", m->h[i / 4] >> (8 * (i % 4)) & 0xff);
+}
+
+/* nv_data.bin.md5 = hex MD5(nv_data.bin + secret), as the stock RIL does */
+static void nv_update_md5(void)
+{
+	char path[1024], hex[33];
+	uint8_t blk[4096];
+	struct md5 m;
+	ssize_t n;
+	int fd;
+
+	snprintf(path, sizeof(path), "%s/nv_data.bin", rfs.efs);
+	fd = open(path, O_RDONLY);
+	if (fd < 0)
+		goto fail;
+	md5_init(&m);
+	while ((n = read(fd, blk, sizeof(blk))) > 0)
+		md5_update(&m, blk, n);
+	close(fd);
+	if (n < 0)
+		goto fail;
+	md5_update(&m, (const uint8_t *)NV_SECRET, strlen(NV_SECRET));
+	md5_hex(&m, hex);
+
+	/* rewrite in place: keeps the file's owner and mode */
+	strcat(path, ".md5");
+	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_SYNC, 0700);
+	if (fd < 0 || write(fd, hex, 32) != 32) {
+		if (fd >= 0)
+			close(fd);
+		goto fail;
+	}
+	close(fd);
+	return;
+fail:
+	stamp();
+	printf("RFS nv_data.bin.md5 update FAILED: %s\n", strerror(errno));
+}
+
+static int nv_open(void)
+{
+	char path[1024];
+
+	snprintf(path, sizeof(path), "%s/nv_data.bin", rfs.efs);
+	return open(path, O_RDWR | O_SYNC);
+}
+
+static void rfs_nv(const uint8_t *q, size_t n)
+{
+	uint8_t cmd = q[4], id = q[5];
+	uint32_t off = n >= 14 ? get32(q + 6) : 0;
+	uint32_t len = n >= 14 ? get32(q + 10) : 0;
+	struct stat st;
+	ssize_t done = -1;
+	uint8_t *r;
+	int fd;
+
+	if (len > RFS_MAX)
+		len = RFS_MAX;
+	r = calloc(1, 15 + len);
+	fd = nv_open();
+	if (!r || fd < 0 || fstat(fd, &st) < 0 || (uint64_t)off + len > (uint64_t)st.st_size) {
+		/* never grow nv_data.bin */
+		done = -1;
+	} else if (cmd == 0x01) {
+		done = pread(fd, r + 15, len, off);
+	} else if (n >= 14 + (size_t)len) {
+		done = pwrite(fd, q + 14, len, off);
+		fsync(fd);
+	}
+	if (fd >= 0)
+		close(fd);
+	if (cmd == 0x02 && done == (ssize_t)len)
+		nv_update_md5();
+
+	stamp();
+	printf("RFS NV_%s off=0x%x len=%u -> %zd\n", cmd == 0x01 ? "READ" : "WRITE",
+	       off, len, done);
+	if (!r)
+		return;
+	r[6] = done == (ssize_t)len;
+	put32(r + 7, off);
+	put32(r + 11, done > 0 ? done : 0);
+	rfs_reply(r, 15 + (cmd == 0x01 && done > 0 ? done : 0), cmd, id);
+	free(r);
+}
+
+static void rfs_info(uint8_t cmd, uint8_t id, int ret, int err, const struct stat *st)
+{
+	uint8_t r[32] = { 0 };
+	const struct timespec *ts[2] = { &st->st_ctim, &st->st_mtim };
+	int i;
+
+	put32(r + 6, ret);
+	if (ret == 0) {
+		r[10] = S_ISDIR(st->st_mode) ? 1 : 2;
+		put32(r + 12, st->st_size);
+		for (i = 0; i < 2; i++) {
+			struct tm tm;
+			uint8_t *t = r + 16 + 6 * i;
+
+			if (!localtime_r(&ts[i]->tv_sec, &tm))
+				continue;
+			t[0] = tm.tm_year - 100;
+			t[1] = tm.tm_mon + 1;
+			t[2] = tm.tm_mday;
+			t[3] = tm.tm_hour;
+			t[4] = tm.tm_min;
+			t[5] = tm.tm_sec;
+		}
+	} else {
+		put32(r + 28, err);
+	}
+	rfs_reply(r, sizeof(r), cmd, id);
+	stamp();
+	printf("RFS 0x%02x id=%u -> info ret=%d errno=%d\n", cmd, id, ret,
+	       ret < 0 ? err : 0);
+}
+
+static void rfs_handle(const uint8_t *q, size_t n)
+{
+	uint8_t cmd = q[4], id = q[5];
+	int32_t a = n >= 10 ? (int32_t)get32(q + 6) : -1;
+	uint32_t b = n >= 14 ? get32(q + 10) : 0;
+	char *path = NULL;
+	struct stat st;
+	int ret, err;
+
+	switch (cmd) {
+	case 0x01:
+	case 0x02:
+		rfs_nv(q, n);
+		return;
+	case 0x03: {		/* READ fd, len */
+		uint8_t *r;
+
+		if (b > RFS_MAX / 2)
+			b = RFS_MAX / 2;
+		r = calloc(1, 14 + b);
+		if (!r)
+			return;
+		errno = EBADF;
+		ret = a >= 0 ? read(a, r + 14, b) : -1;
+		err = errno;
+		put32(r + 6, ret > 0 ? ret : 0);
+		put32(r + 10, ret < 0 ? err : 0);
+		rfs_reply(r, 14 + (ret > 0 ? ret : 0), cmd, id);
+		free(r);
+		stamp();
+		printf("RFS READ fd=%d len=%u -> %d\n", a, b, ret);
+		return;
+	}
+	case 0x04:		/* WRITE fd, len, data */
+		if (n < 14 + (size_t)b)
+			b = n - 14;
+		errno = EBADF;
+		ret = a >= 0 ? write(a, q + 14, b) : -1;
+		err = errno;
+		if (ret >= 0)
+			fsync(a);
+		rfs_reply_ret(cmd, id, ret, err);
+		return;
+	case 0x05: {		/* LSEEK fd, off, whence */
+		uint8_t r[18] = { 0 };
+		int whence = n >= 18 ? (int32_t)get32(q + 14) : SEEK_SET;
+
+		errno = EBADF;
+		ret = a >= 0 ? lseek(a, (int32_t)b, whence) : -1;
+		err = errno;
+		put32(r + 10, ret);
+		put32(r + 14, ret < 0 ? err : 0);
+		rfs_reply(r, sizeof(r), cmd, id);
+		stamp();
+		printf("RFS LSEEK fd=%d off=%d whence=%d -> %d\n", a, (int32_t)b, whence, ret);
+		return;
+	}
+	case 0x06:		/* CLOSE fd */
+		errno = EBADF;
+		ret = a >= 0 ? close(a) : -1;
+		rfs_reply_ret(cmd, id, ret, errno);
+		return;
+	case 0x13:		/* GET_HANDLE_INFO fd */
+		errno = EBADF;
+		ret = a >= 0 ? fstat(a, &st) : -1;
+		rfs_info(cmd, id, ret, errno, &st);
+		return;
+	case 0x11:		/* OPEN flags, plen, path */
+		path = rfs_path(q + 14, b, n - 14);
+		break;
+	case 0x0a: case 0x0b: case 0x0c: case 0x14:	/* plen, path */
+		path = rfs_path(q + 10, a, n - 10);
+		break;
+	default:
+		stamp();
+		printf("RFS cmd 0x%02x not implemented\n", cmd);
+		rfs_reply_ret(cmd, id, -1, ENOSYS);
+		return;
+	}
+
+	stamp();
+	printf("RFS 0x%02x path \"%s\"\n", cmd, path ? path : "(rejected)");
+	errno = EINVAL;
+	ret = -1;
+	if (path) {
+		switch (cmd) {
+		case 0x11:
+			if (a & O_CREAT)
+				rfs_mkparents(path);
+			ret = open(path, (a | O_SYNC) & ~O_NOCTTY, 0775);
+			break;
+		case 0x0a:
+			ret = stat(path, &st);
+			break;
+		case 0x0b:
+			ret = unlink(path);
+			break;
+		case 0x0c:
+			rfs_mkparents(path);
+			ret = mkdir(path, 0775);
+			if (ret < 0 && errno == EEXIST)
+				ret = 0;
+			break;
+		case 0x14:
+			rfs_mkparents(path);
+			ret = creat(path, 0775);
+			break;
+		}
+	}
+	err = errno;
+	free(path);
+	if (cmd == 0x0a)
+		rfs_info(cmd, id, ret < 0 ? -1 : 0, err, &st);
+	else
+		rfs_reply_ret(cmd, id, ret, err);
+}
+
+/* feed one read() worth of umts_rfs0 data */
+static void rfs_rx(const uint8_t *p, size_t n)
+{
+	if (!rfs.have) {
+		if (n < 6) {
+			stamp();
+			printf("RFS short frame (%zu bytes) dropped\n", n);
+			return;
+		}
+		rfs.want = get32(p);
+		if (rfs.want < 6 || rfs.want > RFS_MAX) {
+			stamp();
+			printf("RFS bad length %zu, dropped\n", rfs.want);
+			return;
+		}
+	}
+	if (rfs.have + n > rfs.want)
+		n = rfs.want - rfs.have;
+	memcpy(rfs.buf + rfs.have, p, n);
+	rfs.have += n;
+	if (rfs.have < rfs.want)
+		return;
+	show_rfs("rx", rfs.buf, rfs.have);
+	rfs_handle(rfs.buf, rfs.have);
+	rfs.have = 0;
+}
+
 /* --- data call ---------------------------------------------------------- */
 
-enum dc_step { DC_OFF, DC_DEFINE, DC_ATTACH, DC_ACTIVATE, DC_UP };
+enum dc_step { DC_OFF, DC_AT_CGDCONT, DC_AT_CGATT, DC_DEFINE, DC_ACTIVATE, DC_UP };
 
 static struct {
 	enum dc_step step;
-	int fd;
+	int fd;			/* umts_ipc0 */
+	int at_fd;		/* umts_router */
 	uint8_t cid;
 	const char *apn;
 	const char *hook;
 	uint8_t mseq;
+	char at_rx[512];	/* AT reply collected so far */
+	time_t deadline;	/* retry the attach after this */
 } dc;
 
 static void fmt_send(uint8_t *f, size_t n)
@@ -204,33 +675,124 @@ static void fmt_send(uint8_t *f, size_t n)
 		perror("mifmon: write umts_ipc0");
 }
 
+static void at_send(const char *cmd)
+{
+	char line[256];
+
+	snprintf(line, sizeof(line), "%s\r", cmd);
+	stamp();
+	printf("ROUTER tx \"%s\\r\"\n", cmd);
+	dc.at_rx[0] = 0;
+	if (write(dc.at_fd, line, strlen(line)) < 0)
+		perror("mifmon: write umts_router");
+}
+
+static time_t now_s(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec;
+}
+
+/*
+ * The CP does not attach to LTE by itself: the stock RIL gives it an
+ * initial-attach context first. That part is done over AT (CGDCONT +
+ * CGATT); an AT-activated context is not routed to rmnet, so the data
+ * call itself goes over Samsung IPC (define + activate).
+ */
 static void dc_next(void)
 {
 	uint8_t f[134];
+	char cmd[160];
 
 	memset(f, 0, sizeof(f));
 	switch (dc.step) {
-	case DC_OFF:		/* define the context */
+	case DC_OFF:		/* initial-attach context */
+		snprintf(cmd, sizeof(cmd), "AT+CGDCONT=%u,\"IPV4V6\",\"%s\"",
+			 dc.cid, dc.apn);
+		dc.step = DC_AT_CGDCONT;
+		dc.deadline = now_s() + 10;
+		at_send(cmd);
+		break;
+	case DC_AT_CGDCONT:	/* attach; OK once registered on PS */
+		dc.step = DC_AT_CGATT;
+		dc.deadline = now_s() + 60;
+		at_send("AT+CGATT=1");
+		break;
+	case DC_AT_CGATT:	/* define the context over IPC */
 		f[4] = 0x0d; f[5] = 0x01; f[6] = 3;
 		f[7] = 1;
 		f[8] = dc.cid;
 		f[9] = 6;	/* IPv4v6 (RIL DataProtocol 3) */
 		strncpy((char *)f + 10, dc.apn, 100);
 		dc.step = DC_DEFINE;
+		dc.deadline = now_s() + 20;
 		fmt_send(f, 134);
 		break;
-	case DC_DEFINE:		/* PS attach (no-op if already attached) */
-		f[4] = 0x0d; f[5] = 0x03; f[6] = 3;
-		f[7] = 1;
-		dc.step = DC_ATTACH;
-		fmt_send(f, 10);
-		break;
-	case DC_ATTACH:		/* activate */
+	case DC_DEFINE:		/* activate */
 		f[4] = 0x0d; f[5] = 0x04; f[6] = 3;
 		f[7] = 1;
 		f[8] = dc.cid;
 		dc.step = DC_ACTIVATE;
+		dc.deadline = now_s() + 20;
 		fmt_send(f, 112);
+		break;
+	default:
+		break;
+	}
+}
+
+/* AT replies during the attach phase */
+static void dc_at_rx(const uint8_t *p, size_t n)
+{
+	size_t have = strlen(dc.at_rx);
+
+	if (dc.step != DC_AT_CGDCONT && dc.step != DC_AT_CGATT)
+		return;
+	if (have + n >= sizeof(dc.at_rx))
+		have = 0;
+	memcpy(dc.at_rx + have, p, n);
+	dc.at_rx[have + n] = 0;
+	if (strstr(dc.at_rx, "\r\nOK\r\n")) {
+		dc_next();
+	} else if (strstr(dc.at_rx, "ERROR")) {
+		stamp();
+		printf("DATA attach step failed, retrying in 10 s\n");
+		dc.step = DC_AT_CGDCONT;	/* retry CGATT */
+		dc.deadline = now_s() + 10;
+		dc.at_rx[0] = 0;
+	}
+}
+
+/* start over (CP rebooted, or a step got no answer) after delay seconds */
+static void dc_restart(int delay)
+{
+	dc.step = DC_OFF;
+	dc.deadline = now_s() + delay;
+}
+
+/* called on poll timeout / every loop */
+static void dc_tick(void)
+{
+	if (!dc.deadline || now_s() < dc.deadline)
+		return;
+	switch (dc.step) {
+	case DC_OFF:
+		dc_next();
+		break;
+	case DC_AT_CGDCONT:
+	case DC_AT_CGATT:
+		stamp();
+		printf("DATA no attach yet, retrying\n");
+		dc.step = dc.step == DC_AT_CGATT ? DC_AT_CGDCONT : DC_OFF;
+		dc_next();
+		break;
+	case DC_DEFINE:
+	case DC_ACTIVATE:
+		stamp();
+		printf("DATA no answer from the CP, starting over\n");
+		dc_restart(0);
 		break;
 	default:
 		break;
@@ -255,6 +817,7 @@ static void dc_ip_config(const uint8_t *p, size_t n)
 	printf("DATA cid=%u iface=%s ip=%s dns=%s,%s mtu=%u\n",
 	       dc.cid, iface, ip, dns1, dns2, mtu);
 	dc.step = DC_UP;
+	dc.deadline = 0;
 	if (!dc.hook)
 		return;
 
@@ -279,23 +842,35 @@ static void dc_rx(const uint8_t *p, size_t n)
 {
 	if (n < 7)
 		return;
+	if (p[4] == 0x01 && p[5] == 0x01) {
+		/* PWR_PHONE_PWR_UP: the CP (re)booted, its contexts are gone */
+		stamp();
+		printf("DATA CP powered up, setting up the data call again\n");
+		dc_restart(5);
+		return;
+	}
 	if (p[4] == 0x80 && p[5] == 0x01 && n >= 12 && p[7] == 0x0d) {
 		/* GEN_PHONE_RES for one of ours: group, index, type, code */
 		unsigned int code = p[10] | p[11] << 8;
 
 		stamp();
 		printf("DATA 0d%02x -> 0x%04x\n", p[8], code);
-		if ((p[8] == 0x01 && dc.step == DC_DEFINE) ||
-		    (p[8] == 0x03 && dc.step == DC_ATTACH))
-			dc_next();	/* attach may fail if already attached */
-		else if (p[8] == 0x04 && dc.step == DC_ACTIVATE && code != 0x8000)
-			printf("DATA activate refused (registered? -c/-A right?)\n");
+		if (p[8] == 0x01 && dc.step == DC_DEFINE)
+			dc_next();
+		else if (p[8] == 0x04 && dc.step == DC_ACTIVATE && code != 0x8000) {
+			printf("DATA activate refused (-c/-A right?), retrying in 30 s\n");
+			dc_restart(30);
+		}
 	} else if (p[4] == 0x0d && p[5] == 0x09) {
 		dc_ip_config(p, n);
 	} else if (p[4] == 0x0d && p[5] == 0x10 && n >= 9 && p[7] == dc.cid) {
 		stamp();
 		printf("DATA call status cid=%u state=%u%s\n", p[7], p[8],
 		       p[8] == 1 ? " (active)" : "");
+		if (p[8] != 1 && dc.step == DC_UP) {
+			printf("DATA call dropped, setting it up again in 10 s\n");
+			dc_restart(10);
+		}
 	}
 }
 
@@ -309,7 +884,8 @@ int main(int argc, char **argv)
 	dc.cid = 1;
 	dc.apn = "";
 	dc.mseq = 0x40;
-	while ((opt = getopt(argc, argv, "a:f:dc:A:s:")) != -1) {
+	rfs.efs = "/var/lib/android-modem/efs";
+	while ((opt = getopt(argc, argv, "a:f:dc:A:s:re:")) != -1) {
 		switch (opt) {
 		case 'a': at_cmd = optarg; break;
 		case 'f': fmt_hex = optarg; break;
@@ -317,9 +893,11 @@ int main(int argc, char **argv)
 		case 'c': dc.cid = atoi(optarg); break;
 		case 'A': dc.apn = optarg; break;
 		case 's': dc.hook = optarg; break;
+		case 'r': rfs.buf = malloc(RFS_MAX); break;
+		case 'e': rfs.efs = optarg; break;
 		default:
 			fprintf(stderr, "usage: %s [-a AT-command] [-f hex-fmt-frame]"
-				" [-d [-c cid] [-A apn] [-s hook]]\n", argv[0]);
+				" [-d [-c cid] [-A apn] [-s hook]] [-r [-e efs]]\n", argv[0]);
 			return 2;
 		}
 	}
@@ -346,6 +924,12 @@ int main(int argc, char **argv)
 			perror("mifmon: write umts_ipc0");
 	}
 	dc.fd = pfd[0].fd;
+	dc.at_fd = pfd[2].fd;
+	rfs.fd = pfd[1].fd;
+	if (data && dc.at_fd < 0) {
+		fprintf(stderr, "mifmon: -d needs /dev/umts_router\n");
+		return 1;
+	}
 	if (data)
 		dc_next();
 	if (at_cmd && pfd[2].fd >= 0) {
@@ -357,7 +941,9 @@ int main(int argc, char **argv)
 	}
 
 	for (;;) {
-		if (poll(pfd, 3, -1) < 0) {
+		if (data)
+			dc_tick();
+		if (poll(pfd, 3, data ? 2000 : -1) < 0) {
 			if (errno == EINTR)
 				continue;
 			perror("mifmon: poll");
@@ -381,10 +967,16 @@ int main(int argc, char **argv)
 				if (data)
 					dc_rx(buf, n);
 			}
-			else if (i == 1)
-				show_rfs("rx", buf, n);
-			else
+			else if (i == 1) {
+				if (rfs.buf)
+					rfs_rx(buf, n);
+				else
+					show_rfs("rx", buf, n);
+			} else {
 				show_raw("ROUTER", buf, n);
+				if (data)
+					dc_at_rx(buf, n);
+			}
 		}
 	}
 }

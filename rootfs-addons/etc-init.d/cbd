@@ -15,8 +15,7 @@ output_log=/var/log/cbd.log
 error_log=/var/log/cbd.log
 
 depend() {
-	need localmount
-	before modem-ipc
+	need localmount modem-ipc
 }
 
 start_pre() {
