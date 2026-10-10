@@ -632,3 +632,20 @@ Plan: docs/RIL-PLAN.md. Test sequence for the phone: docs/RIL-BRINGUP.md.
   (pstore registers there). Boots, Plasma OK. smcprobe4 seh=1 step=1 STILL froze in SMC -123.
   => not the S-Boot debug areas either. Next isolation: boot TWRP's 4.4 kernel THROUGH
   uniLoader (uniLoader vs mainline), or diff what mainline does early (GIC, PSCI, timers).
+
+## 2026-10-10 ~10:50 ROOT CAUSE OF THE SMC HANG: clk_disable_unused / unused power domains
+- Isolation: TWRP's 4.4 kernel booted THROUGH uniLoader (laptop work/boot-twrp-via-uniloader.img:
+  TWRP Image @0x80080000, its LZMA ramdisk @0x84000000, the S-Boot FDT pulled from a real TWRP
+  boot with /chosen initrd moved) -> "set the seh address to el3 monitor well", Kinibi starts.
+  So uniLoader is fine; the mainline kernel breaks the monitor.
+- boot-v185-clkignore.img = v184 + "clk_ignore_unused pd_ignore_unused" in bootargs: SMCs WORK:
+    SET_SEH_ADDRESS (-123)          -> 0x0
+    Kinibi MC_FC_INFO(0xFF000002,0) -> ret 0, state 0 (NOT_INITIALIZED), info 0x10006
+    CP READ_CTRL CP_CTRL_NS         -> ret 0, 0x002016a0 (CP_PWRON=0: CP off)
+    CP READ_CTRL CP_CTRL_S          -> ret 0, 0x00000000 (CP_START=0)
+  The monitor touches a block whose clock / power domain Linux gated as "unused"; that access
+  hangs the bus (same class as the TMU-pclk and PLL_MIF hangs). TODO: find the exact
+  clock(s)/domain(s) and claim them in DT instead of the blanket ignore_unused.
+- Layout changes carried in v184/v185 (keep): kernel @0x80200000 (uniLoader PAYLOAD_ENTRY),
+  0x91000000-0x92ffffff no-map (S-Boot ess/sec_debug areas), ramoops @0x9f000000, TIMA
+  0xb1000000 no-map, cma=256M@0xa0000000-0xb1000000.
