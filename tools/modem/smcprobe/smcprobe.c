@@ -20,6 +20,7 @@ the phone; pmu=1 tries the other status registers one by one.
 #include <linux/arm-smccc.h>
 #include <linux/io.h>
 #include <linux/module.h>
+#include <linux/delay.h>
 #include <asm/cputype.h>
 
 #define SMC_ID		0x82000700
@@ -76,6 +77,13 @@ static void smcprobe_seh(unsigned int id, unsigned long elr,
 		cpu_relax();
 }
 
+/*
+ * printk only queues the line; /dev/kmsg readers are woken a moment later.
+ * If the next SMC never returns, the line is lost. Sleep before each SMC
+ * so the message reaches a remote log stream first.
+ */
+#define say(fmt, ...) do { pr_info(fmt, ##__VA_ARGS__); msleep(1000); } while (0)
+
 static long smc(unsigned long a1, unsigned long a2, unsigned long a3)
 {
 	struct arm_smccc_res res;
@@ -109,11 +117,12 @@ static int __init smcprobe_init(void)
 		pr_info("smcprobe: PMU CP_STAT=%08x\n", readl(base + PMU_CP_STAT));
 	}
 
-	pr_info("smcprobe: running on CPU %d (MPIDR %llx)\n", raw_smp_processor_id(),
+	say("smcprobe: running on CPU %d (MPIDR %llx)\n", raw_smp_processor_id(),
 		read_cpuid_mpidr());
 	if (seh) {
 		struct arm_smccc_res res;
 
+		say("smcprobe: SMC SET_SEH_ADDRESS ...\n");
 		arm_smccc_smc((unsigned long)SMC_CMD_SET_SEH_ADDRESS,
 			      (unsigned long)smcprobe_seh, 0, 0, 0, 0, 0, 0, &res);
 		pr_info("smcprobe: SET_SEH_ADDRESS -> 0x%lx\n", res.a0);
@@ -121,11 +130,11 @@ static int __init smcprobe_init(void)
 	if (step < 2)
 		return seh ? 0 : -EAGAIN;
 
-	pr_info("smcprobe: SMC READ_CTRL CP_CTRL_NS ...\n");
+	say("smcprobe: SMC READ_CTRL CP_CTRL_NS ...\n");
 	ret = smc_read(CP_CTRL_NS, &ns);
 	pr_info("smcprobe: SMC CP_CTRL_NS: ret=%d val=%08x\n", ret, ns);
 
-	pr_info("smcprobe: SMC READ_CTRL CP_CTRL_S ...\n");
+	say("smcprobe: SMC READ_CTRL CP_CTRL_S ...\n");
 	ret = smc_read(CP_CTRL_S, &s);
 	pr_info("smcprobe: SMC CP_CTRL_S: ret=%d val=%08x\n", ret, s);
 
