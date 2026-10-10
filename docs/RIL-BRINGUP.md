@@ -12,6 +12,13 @@
 > Working run: `mifmon &` then `android-env run /vendor/bin/cbd -d -tss310 -bm -mm
 > -P platform/11120000.ufs/by-name/RADIO -n /efs`; then `printf 'AT\r' >
 > /dev/umts_router` (replies in mifmon's log). Details in HANDOVER.md.
+>
+> **Update: LTE registration and mobile data work.** With a SIM, attach once
+> over AT (`AT+CGDCONT=1,"IPV4V6",""` then `AT+CGATT=1` on umts_router), then
+> run mifmon as `mifmon -d -s /usr/local/bin/rmnet-up` (instead of plain
+> `mifmon`): it defines and activates context 1 over Samsung IPC and
+> configures rmnet0 from the CP's IP configuration. An AT-activated context is
+> not routed to rmnet; only the IPC path is. See step 6.
 
 Companion to [RIL-PLAN.md](RIL-PLAN.md). Kernel side: `exynos8895-modem.patch`
 (Samsung's `modem_v1` interface driver, ported to 7.0) plus the modem nodes
@@ -145,3 +152,23 @@ sudo rc-service cbd start
 # at boot:
 sudo rc-update add modem-ipc default && sudo rc-update add cbd default
 ```
+
+## 6. Mobile data
+
+The CP routes a PDP context to `rmnet<cid-1>` only when the context is set up
+over Samsung IPC (umts_ipc0), as the stock RIL does. `mifmon -d` sends
+DEFINE_PDP_CONTEXT, PS attach and PDP_CONTEXT activate, then runs the hook
+with the address the CP reports:
+
+```sh
+# once per boot, while LTE is searching (no initial-attach context yet)
+printf 'AT+CGDCONT=1,"IPV4V6",""\r' > /dev/umts_router
+printf 'AT+CGATT=1\r' > /dev/umts_router
+# the data call (replaces plain mifmon; only one reader of umts_ipc0 allowed)
+sudo mifmon -d -s /usr/local/bin/rmnet-up      # -A <apn> -c <cid> if needed
+ping -I rmnet0 1.1.1.1
+```
+
+`rmnet-up` adds a default route with metric 700 (Wi-Fi/USB stay preferred;
+`RMNET_METRIC=0` to prefer mobile data) and writes the operator's DNS to
+`/run/rmnet-resolv.conf`.

@@ -3,10 +3,17 @@
 # /dev/umts_rfs0 open (the kernel only completes the CP handshake with
 # CMD_INIT_END while both are open) and logs every IPC/RFS frame to
 # /var/log/mifmon.log. Replaced by a real RIL once one exists.
+#
+# MIFMON_DATA=yes in /etc/conf.d/modem-ipc also brings up mobile data on
+# rmnet0 (mifmon -d, configured by /usr/local/bin/rmnet-up); MIFMON_APN sets
+# the APN (default: network-provided).
 
 description="Shannon CP IPC monitor (mifmon)"
 
 command=/usr/local/bin/mifmon
+if [ "${MIFMON_DATA:-no}" = yes ]; then
+	command_args="-d -s /usr/local/bin/rmnet-up -A '${MIFMON_APN:-}'"
+fi
 supervisor=supervise-daemon
 output_log=/var/log/mifmon.log
 error_log=/var/log/mifmon.log

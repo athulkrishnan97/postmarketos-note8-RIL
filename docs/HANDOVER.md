@@ -674,3 +674,35 @@ pd_ignore_unused, uniLoader PAYLOAD_ENTRY 0x80200000. 40,441,856 bytes (BOOT 41,
 - Next: SIM check; RFS server (cbd/rild normally answer RFS - CP file requests to /efs);
   expose umts_router to ModemManager (WWAN AT port or a udev/ID_MM tag on a tty bridge);
   data path; find the exact clocks behind clk_ignore_unused.
+
+## 2026-10-10 ~11:50 LTE REGISTRATION AND MOBILE DATA WORK
+SIM (Lidl Connect IE) inserted, same v186 boot, cbd + mifmon running.
+- After SIM: +CPIN READY, +COPS 0,0,"Lidl Connect",7 but +CEREG 0,2 (searching), CGATT 0,
+  CGDCONT empty. The CP does not attach on its own: the stock RIL sets the initial-attach
+  context. `AT+CGDCONT=1,"IPV4V6",""` + `AT+CGATT=1` -> +CEREG stat 1 (home, LTE), CGATT 1,
+  CGACT 1,1. (Cell reselection between two cells shows brief stat 2 URCs; normal at CSQ 8-10.)
+  CREG stays 0,0 (no CS domain on LTE-only; voice/SMS need IMS or CSFB - not looked at yet).
+- An AT-activated context is NOT routed to rmnet: TX leaves the AP, nothing comes back
+  (napi rx_poll_count per PS ring stays 0). AT+CGDATA only offers "IP"/"PPP" on the AT channel.
+- Fix: Samsung IPC over umts_ipc0, decoded from the stock libsec-ril.so (N950FXXUGDZEC system
+  image on the laptop, work/stock/libsec-ril.so; IpcProtocol41::IpcTxDefinePdpContext /
+  IpcTxPsAttach / IpcTxSetPdpContext):
+    0d 01 SET  DEFINE_PDP_CONTEXT  [1, cid, pdp_type(6=v4v6), apn[100], ...] 134 bytes
+    0d 03 SET  PS attach           [1, 0, 0] 10 bytes (-> 0x8005 when already attached)
+    0d 04 SET  PDP_CONTEXT         [1=activate/0=deact, cid, auth...] 112 bytes
+  Each answered by GEN_PHONE_RES 80 01 [grp idx type code16] (0x8000 OK, 0x8001 refused,
+  0x8003 unsupported). Activate without a DEFINE first -> 0x8001.
+  Then the CP sends GPRS_IP_CONFIGURATION 0d 09: [cid, flags 0x07, ?, ip4, dns1, dns2, ...,
+  u16 mtu @0x9f] (IP differs from the stale AT+CGPADDR value!) and GPRS_CALL_STATUS 0d 10
+  [cid, 1=active]. Context cid N -> rmnet(N-1).
+- RX frame types differ from TX: 1 INDI, 2 RESP, 3 NOTI (mifmon printed them as EXEC/GET/SET).
+- `mifmon -d -s /usr/local/bin/rmnet-up` does the whole sequence; rmnet-up sets the IP/32,
+  MTU 1430, a metric-700 default route, /run/rmnet-resolv.conf. Ping 1.1.1.1 over rmnet0
+  30-50 ms; HTTP to 1.1.1.1/cdn-cgi/trace -> loc=IE.
+- Only ONE process may read umts_ipc0: a second reader (e.g. `mifmon -f` next to the
+  service) steals the CP's replies.
+- Group 0x03 idx 0x02 (IpcTxSetDataCallEstablish) -> 0x8003 on this CP; not needed.
+- Still open: RFS server (CP file requests, len field parsing in mifmon is wrong for big
+  frames: reads are 64 KiB-chunked), attach without AT (send DEFINE before attach at boot -
+  untested whether the CP then attaches by itself), ModemManager integration, SMS/voice (IMS),
+  exact clocks behind clk_ignore_unused.
