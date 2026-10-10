@@ -1,8 +1,13 @@
 #!/bin/sh
 # Minimal Android environment for running Samsung's own CP boot daemon
-# (cbd) on postmarketOS, straight from the phone's untouched SYSTEM
-# partition (stock or LineageOS). No Android services are started: cbd only
-# needs the bionic linker, liblog/libcutils/libc++ and the modem device nodes.
+# (cbd) on postmarketOS. No Android services are started: cbd only needs the
+# bionic linker, liblog/libcutils/libc++ and the modem device nodes.
+#
+# Two sources for bionic:
+#  - a prebuilt root unpacked into $ROOT (tools/modem/make-android-root.sh:
+#    TWRP's bionic + cbd) - used when $ROOT/system/bin/linker64 exists;
+#    this is the tested path (the dev phone's SYSTEM partition is empty)
+#  - otherwise the phone's SYSTEM partition (stock or LineageOS)
 #
 #   android-env.sh up      mount everything under $ROOT (idempotent)
 #   android-env.sh down    unmount
@@ -29,11 +34,14 @@ mnt() {	# mnt <opts> <src> <dst>
 }
 
 up() {
-	[ -e "$BYLABEL/SYSTEM" ] || die "no SYSTEM partition"
 	[ -e "$BYLABEL/EFS" ] || die "no EFS partition"
 	[ -e "$BYLABEL/RADIO" ] || die "no RADIO partition"
 	mkdir -p "$ROOT"
 
+	if [ -x "$ROOT/system/bin/linker64" ] && ! is_mounted "$ROOT/system"; then
+		: # prebuilt root (make-android-root.sh)
+	else
+	[ -e "$BYLABEL/SYSTEM" ] || die "no SYSTEM partition and no prebuilt root"
 	# SYSTEM: either a classic /system image or system-as-root
 	mnt "-o ro" "$BYLABEL/SYSTEM" "$ROOT/.sysimg"
 	if [ -d "$ROOT/.sysimg/system/bin" ]; then
@@ -56,6 +64,7 @@ up() {
 		[ -f "$img" ] || unzip -p "$apex" apex_payload.img > "$img"
 		mnt "-o ro,loop" "$img" "$ROOT/apex/$name"
 	done
+	fi
 
 	# EFS: read-write, cbd writes nv_data.bin back after the CP updates it
 	mnt "" "$BYLABEL/EFS" "$ROOT/efs"
@@ -86,7 +95,8 @@ down) down ;;
 run)
 	shift
 	up >/dev/null
-	exec chroot "$ROOT" "$@"
+	# bionic does not search /system/lib64 for /vendor binaries by default
+	LD_LIBRARY_PATH=/system/lib64 exec chroot "$ROOT" "$@"
 	;;
 *) echo "usage: $0 up|down|run CMD..." >&2; exit 2 ;;
 esac

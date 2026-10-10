@@ -1,0 +1,6 @@
+# Shannon CP (modem): Samsung's cbd drops root and runs as the Android
+# "radio" user (uid/gid 1001, which also owns the files on EFS). Give it the
+# modem device nodes and the RADIO partition (modem.bin), like Android's
+# ueventd does.
+KERNEL=="umts_*", OWNER="1001", GROUP="1001", MODE="0660"
+SUBSYSTEM=="block", ENV{ID_PART_ENTRY_NAME}=="RADIO", OWNER="1001", GROUP="1001", MODE="0660"

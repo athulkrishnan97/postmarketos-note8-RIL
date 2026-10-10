@@ -649,3 +649,28 @@ Plan: docs/RIL-PLAN.md. Test sequence for the phone: docs/RIL-BRINGUP.md.
 - Layout changes carried in v184/v185 (keep): kernel @0x80200000 (uniLoader PAYLOAD_ENTRY),
   0x91000000-0x92ffffff no-map (S-Boot ess/sec_debug areas), ramoops @0x9f000000, TIMA
   0xb1000000 no-map, cma=256M@0xa0000000-0xb1000000.
+
+## 2026-10-10 ~11:05 THE MODEM BOOTS ON MAINLINE AND ANSWERS AT
+Phone: boot-v186-modem.img (laptop work/) = laptop tree work/linux-7.0 copy (work/linux-7.0-ril)
++ exynos8895-modem.patch, SEC_SIPC_MODEM_IF=y, phone DTB with v185 layout + clk_ignore_unused
+pd_ignore_unused, uniLoader PAYLOAD_ENTRY 0x80200000. 40,441,856 bytes (BOOT 41,943,040).
+- Driver probes: mcu_ipc, shm_ipc (ipc_off 128M, 5M), ss355ap ctl + shmem link, /dev/umts_boot0,
+  ipc0/1, rfs0, csd, router, dm0, ramdump0, rmnet0-7.
+- Android root for cbd = TWRP bionic (RECOVERY ramdisk sbin/: linker64 + libc libm libdl liblog
+  libcutils libc++ libbase libz; ld-android.so is internal to the linker) + lineage-18.1 cbd,
+  in /var/lib/android-modem (tools/modem/make-android-root.sh). Run with
+  LD_LIBRARY_PATH=/system/lib64. cbd drops to uid 1001 (radio): /dev/umts_* and RADIO (sda9)
+  must be 1001:1001 0660 (rootfs-addons/etc-udev-rules.d/60-greatlte-modem.rules).
+- `cbd -d -tss310 -bm -mm -P platform/11120000.ufs/by-name/RADIO -n /efs` with mifmon holding
+  ipc0+rfs0: TOC read (BOOT/MAIN/VSS/NV), SECURITY_REQ mode 2 then mode 0 (size 7860, 38461112)
+  -> return 0, MODEM_ON, BOOT_ON (cp_status=1), DL_START (magic BOOT), BOOT_OFF: INIT_START ->
+  SBD setup -> PIF_INIT_DONE -> CP_START -> INIT_END -> state ONLINE.
+- CP sends FMT unsolicited: PWR 0x01, SEC 0x01/0x07 (SIM), GPRS 0x0f, CALL 0x16, NET 0x03/0x05,
+  DISP 0x01/0x06; RFS requests start (unanswered).
+- AT on /dev/umts_router WORKS: AT->OK, AT+CGMR/ATI -> N950FXXSGDUG6, AT+CPIN? -> SIM not
+  inserted (ask user whether a SIM is in), AT+COPS? -> +COPS: 0, AT+CSQ -> 17,0.
+  => Userspace route A: ModemManager over AT (umts_router), data via rmnet/multipdp.
+- Harmless cbd warnings: NV validation TIMEOUT (Android property), /sys/power/wake_lock missing.
+- Next: SIM check; RFS server (cbd/rild normally answer RFS - CP file requests to /efs);
+  expose umts_router to ModemManager (WWAN AT port or a udev/ID_MM tag on a tty bridge);
+  data path; find the exact clocks behind clk_ignore_unused.

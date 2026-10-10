@@ -1,5 +1,18 @@
 # Modem (RIL) bring-up: test sequence
 
+> **Status 2026-10-10: the CP boots and answers AT on mainline** (kernel with
+> `exynos8895-modem.patch` + `greatlte-secure-world.patch`, uniLoader payload at
+> 0x80200000). Three things were required that this document originally missed:
+> 1. `clk_ignore_unused pd_ignore_unused` - otherwise every Samsung EL3 monitor
+>    call (CP control, Kinibi) hard-freezes the SoC;
+> 2. bionic for `cbd` from TWRP (`tools/modem/make-android-root.sh`) - the dev
+>    phone's SYSTEM partition is empty;
+> 3. `/dev/umts_*` and RADIO owned by uid/gid 1001 (`60-greatlte-modem.rules`):
+>    `cbd` drops root to the Android radio user.
+> Working run: `mifmon &` then `android-env run /vendor/bin/cbd -d -tss310 -bm -mm
+> -P platform/11120000.ufs/by-name/RADIO -n /efs`; then `printf 'AT\r' >
+> /dev/umts_router` (replies in mifmon's log). Details in HANDOVER.md.
+
 Companion to [RIL-PLAN.md](RIL-PLAN.md). Kernel side: `exynos8895-modem.patch`
 (Samsung's `modem_v1` interface driver, ported to 7.0) plus the modem nodes
 in `exynos8895-greatlte-modem.dtsi`. Userspace: `tools/modem/`.

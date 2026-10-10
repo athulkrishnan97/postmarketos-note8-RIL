@@ -1,0 +1,50 @@
+From: Athul <athulkrishnan97@users.noreply.github.com>
+Date: Sat, 10 Oct 2026 11:15:00 +0100
+Subject: [PATCH] greatlte: let the EL3 monitor work (clk/pd ignore_unused), S-Boot areas
+
+With clk_disable_unused / unused power domains turned off, every Samsung
+EL3 monitor call (CP control, Kinibi, SET_SEH_ADDRESS) hard-froze the SoC:
+the monitor touches a block whose clock Linux gated. clk_ignore_unused
+pd_ignore_unused until the exact clocks are claimed in DT.
+Also reserve the S-Boot debug areas the stock kernel learns from its
+cmdline (ess/sec_debug, 0x91000000-0x92ffffff) and move ramoops out of
+them; uniLoader places the kernel at 0x80200000 now.
+---
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895-greatlte.dts b/arch/arm64/boot/dts/exynos/exynos8895-greatlte.dts
+index 3ed4ddbb4..60c8cae8a 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895-greatlte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos8895-greatlte.dts
+@@ -23,7 +23,7 @@ aliases {
+ 	};
+ 
+ 	chosen {
+-		bootargs = "pmos.force-partition-resize fbcon=font:TER16x32 loglevel=4 softlockup_panic=1 hung_task_panic=1 panic=5 cma=384M@0x80000000-0xbc000000 sysctl.kernel.firmware_config.ignore_sysfs_fallback=1";
++		bootargs = "pmos.force-partition-resize fbcon=font:TER16x32 loglevel=4 softlockup_panic=1 hung_task_panic=1 panic=5 cma=384M@0x80000000-0xbc000000 sysctl.kernel.firmware_config.ignore_sysfs_fallback=1 clk_ignore_unused pd_ignore_unused";
+ 	};
+ 
+ 	memory@80000000 {
+@@ -125,9 +125,22 @@ abox_mem: abox-memory {
+ 			no-map;
+ 		};
+ 
+-		ramoops@92000000 {
++		/*
++		 * Bootloader debug areas, announced to the stock kernel only on
++		 * its command line: ess_setup=0x91200000 (Exynos snapshot, up to
++		 * ~26 MiB), sec_avc_log@0x92202000, sec_tsp_log@0x92244000,
++		 * sec_debug.base=0x100000@0x92286000, auto_summary_log@0x92388000.
++		 * uniLoader now places the kernel at 0x80200000 (it used to
++		 * overlap this range at 0x90000000).
++		 */
++		sboot-debug@91000000 {
++			reg = <0 0x91000000 0x2000000>;
++			no-map;
++		};
++
++		ramoops@9f000000 {
+ 			compatible = "ramoops";
+-			reg = <0 0x92000000 0x8000>;
++			reg = <0 0x9f000000 0x8000>;
+ 			record-size = <0x4000>;
+ 			console-size = <0x4000>;
+ 		};

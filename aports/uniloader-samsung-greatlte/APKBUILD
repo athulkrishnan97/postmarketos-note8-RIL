@@ -2,7 +2,7 @@
 maintainer="athul <athul@postmarketos.org>"
 pkgname=uniloader-samsung-greatlte
 pkgver=0.0.1
-pkgrel=1
+pkgrel=2
 pkgdesc="Samsung Greatlte AArch64 boot shim"
 url="https://github.com/ivoszbg/uniLoader/"
 arch="aarch64"
@@ -38,5 +38,5 @@ package() {
 
 sha512sums="
 7aa9e30ba70a8551365b5a7bd7c5f675db22b2b9904ae06202c176e9f1b19f6846348ee13519ce1896a664c827d276f5fbc0923c81bfc90bade4220979f9de01  uniLoader-e8466561575ed4e2e23217b54b751ea30273549e.tar.gz
-6aad31b8e8376f85330f724ba681b9366aba5229a24b49ab85855a1381f165a6c36c08c0f703d3754b246464aaf8d43cf1f90a7b1a1c61c82abf0e4bab26deb2  greatlte.patch
+0b249dfc7f451ad24d185ae45184575af352b57888a61e400ac27bc8e1d4c5f91a279dfa303b082bb1a57f8873c27194a6dacc8228b750332b320f09931fde7b  greatlte.patch
 "
