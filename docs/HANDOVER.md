@@ -589,3 +589,13 @@ Plan: docs/RIL-PLAN.md. Test sequence for the phone: docs/RIL-BRINGUP.md.
   setup the stock kernel does (exynos-el3_mon.c: SMC_CMD_SET_SEH_ADDRESS -123,
   PROTECT_KERNEL_TEXT -125, SET_DEBUG_MEM -120; exynos-cpumap SMC_CMD_CPUMAP -10), or
   starting the CP from uniLoader before Linux.
+- 2026-10-10 10:11, smcprobe4 seh=1 step=1, taskset -c 0, kmsg streamed with a 1 s delay
+  before each SMC: log ends with "running on CPU 0 (MPIDR 80000100)" then
+  "SMC SET_SEH_ADDRESS ..." -> the phone froze INSIDE SMC -123. DEFINITIVE: the SMCs hang
+  in the secure path itself, from CPU 0 as well, and even the setup call stock Android makes
+  at boot. Only 0x82000501 (ABOX prepare) is known to return.
+  Lessons: `dmesg -w` into a pipe is block-buffered (lost lines); `cat /dev/kmsg` is not, but
+  printk wakes readers lazily, so sleep ~1 s after a message before a call that may hang.
+  Next hypothesis: an EL2 hypervisor (Samsung uH/RKP) trapping SMCs (HCR_EL2.TSC) whose
+  memory we hand to Linux - stock reserves TIMA 0xB1000000 (2 MiB), our CMA window
+  0x80000000-0xbc000000 covers it. Check "CPU: All CPU(s) started at EL1/EL2" in dmesg.
