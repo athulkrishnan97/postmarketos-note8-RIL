@@ -599,3 +599,8 @@ Plan: docs/RIL-PLAN.md. Test sequence for the phone: docs/RIL-BRINGUP.md.
   Next hypothesis: an EL2 hypervisor (Samsung uH/RKP) trapping SMCs (HCR_EL2.TSC) whose
   memory we hand to Linux - stock reserves TIMA 0xB1000000 (2 MiB), our CMA window
   0x80000000-0xbc000000 covers it. Check "CPU: All CPU(s) started at EL1/EL2" in dmesg.
+- 2026-10-10 10:21: boot-v183-tima.img (laptop work/) = v182 + DTB only: TIMA 0xB1000000
+  (2 MiB) reserved no-map, cma=256M@0xa0000000-0xb1000000 (lands at 0xA1000000; Plasma OK,
+  ~52 MiB CMA used at idle). Size 40,298,496 (BOOT is 41,943,040). Flashed remotely
+  (reboot-download + heimdall from the laptop). smcprobe4 seh=1 step=1 STILL froze inside
+  SMC -123 -> TIMA/CMA overlap is NOT the cause. v182 remains the known-good image.
