@@ -744,3 +744,32 @@ SIM (Lidl Connect IE) inserted, same v186 boot, cbd + mifmon running.
   (lexical order). Now 61-greatlte-modem.rules matching the kernel's ENV{PARTNAME}.
 - Second reboot, nothing touched: CP online ~20 s, RFS NV writes answered at 21.8 s, data
   call up at 27.6 s (default route via rmnet0 at metric 700), ping OK.
+
+## 2026-10-10 ~13:25 MODEMMANAGER SEES THE MODEM (WWAN AT PORT PROXIED BY MIFMON)
+Phone: boot-v188-wwan.img (laptop work/) = v186 + exynos8895-modem-wwan.patch (kernel tree
+work/linux-7.0-ril; packed with work/ul-r13 + work/v186-inputs/dtb, saved there from /tmp).
+v187 created the port from modem_probe -> "class_find_device called for class 'wwan' before
+it was registered", no /dev/wwan0at0 (drivers/misc probes before drivers/net/wwan); v188
+creates it from a late_initcall.
+- Why a proxy: the attach must go over AT. IPC-only tests on a fresh CP (RFS answered):
+  0d01+0d03 (PS attach) -> 0x8000 but never attaches and the AT engine wedges; 0d01+0d1b
+  (data profile "lte_internet") -> same wedge. So any IPC GPRS setup before the AT attach
+  wedges AT (this was also the earlier "AT stall" together with the missing RFS answers).
+  `mifmon -I` (IPC attach) kept for experiments only.
+- Kernel: wwan_at_bridge.c: WWAN AT port wwan0at0 (parent mif_pdata) <-> misc
+  /dev/wwan_at_ctl. mifmon -M serves it: passes ModemManager's commands to umts_router,
+  runs its own CGDCONT/CGATT only between them, forwards "+..." URCs that arrive during its
+  own commands, and answers ATZ itself (CP: +CME ERROR: 100; first command of MM's enable
+  sequence, fatal there). Other CP refusals seen (non-fatal): AT+CTZU=1, AT+CESQ=?, ATH (3).
+- ModemManager 1.25.95, generic plugin: "Samsung LTE ALPSS", firmware N950FXXSGDUG6, port
+  wwan0at0 (at). After enable: registered home, LTE, operator "eir" (Lidl Connect's host
+  network), signal 29% (CSQ 9), packet service attached. Data still via mifmon (rmnet0);
+  MM has no net port and would try PPP for a connect - do not let NM activate a mobile
+  connection yet.
+- Reboot test: everything up without intervention (modem enabled by a D-Bus client).
+  rc-status shows modemmanager/polkit "failed": both were D-Bus-activated before their
+  services started (pre-existing; daemons run fine).
+- Service: MIFMON_MM=yes in /etc/conf.d/modem-ipc adds -M; modem-ipc starts before
+  modemmanager.
+- Lesson: `rc-service modemmanager stop` does not stop a D-Bus-activated ModemManager; an MM
+  that outlives a mifmon restart waits forever on a lost reply - restart MM after mifmon.

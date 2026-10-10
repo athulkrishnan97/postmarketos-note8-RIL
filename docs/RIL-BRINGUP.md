@@ -182,3 +182,21 @@ As services: `MIFMON_DATA=yes` in `/etc/conf.d/modem-ipc`, then
 `rmnet-up` adds a default route with metric 700 (Wi-Fi/USB stay preferred;
 `RMNET_METRIC=0` to prefer mobile data) and writes the operator's DNS to
 `/run/rmnet-resolv.conf`.
+
+## 7. ModemManager
+
+Kernel with `exynos8895-modem-wwan.patch` (pkgrel 14) creates `/dev/wwan0at0`
+for ModemManager. The modem has a single AT channel that mifmon needs for the
+LTE attach, so mifmon serves the WWAN port and proxies ModemManager's commands
+(`/dev/wwan_at_ctl`):
+
+```sh
+printf 'MIFMON_DATA=yes\nMIFMON_MM=yes\n' | sudo tee /etc/conf.d/modem-ipc
+sudo rc-service modem-ipc restart      # restarts cbd too (CP reboot)
+sudo rc-service modemmanager restart   # MM must start after mifmon serves the port
+mmcli -L; sudo mmcli -m any -e; mmcli -m any
+```
+
+Expected: generic plugin, port `wwan0at0 (at)`, then registered / lte /
+attached. Mobile data stays with mifmon (rmnet0); ModemManager has no net
+port, so do not activate a mobile connection from NetworkManager yet.

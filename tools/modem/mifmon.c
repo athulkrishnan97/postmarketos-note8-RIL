@@ -11,8 +11,16 @@
  *   mifmon                     log umts_ipc0 + umts_rfs0 (+ umts_router)
  *   mifmon -a 'AT+CPIN?'       also send an AT command on umts_router
  *   mifmon -f <hex bytes>      also send a raw FMT frame on umts_ipc0
+ *                              (up to 8 -f, sent in order)
  *   mifmon -d [-c cid] [-A apn] [-s hook]
  *                              also bring up a data call (see below)
+ *   mifmon -I ...              same, but attach over IPC and never touch
+ *                              the AT port (does NOT attach on this CP; kept
+ *                              for experiments)
+ *   mifmon -M                  also serve /dev/wwan0at0 for ModemManager
+ *                              (via /dev/wwan_at_ctl, kernel wwan_at_bridge):
+ *                              AT proxy to umts_router, our own attach
+ *                              commands go between ModemManager's
  *   mifmon -r [-e efs-dir]     also answer the CP's RFS (file/NV) requests
  *                              (default /var/lib/android-modem/efs)
  *
@@ -650,7 +658,8 @@ static void rfs_rx(const uint8_t *p, size_t n)
 
 /* --- data call ---------------------------------------------------------- */
 
-enum dc_step { DC_OFF, DC_AT_CGDCONT, DC_AT_CGATT, DC_DEFINE, DC_ACTIVATE, DC_UP };
+enum dc_step { DC_OFF, DC_AT_CGDCONT, DC_AT_CGATT, DC_DEFINE, DC_PS_ATTACH, DC_ACTIVATE,
+	       DC_UP };
 
 static struct {
 	enum dc_step step;
@@ -662,6 +671,7 @@ static struct {
 	uint8_t mseq;
 	char at_rx[512];	/* AT reply collected so far */
 	time_t deadline;	/* retry the attach after this */
+	int ipc_attach;		/* -I: attach over IPC, leave the AT port alone */
 } dc;
 
 static void fmt_send(uint8_t *f, size_t n)
@@ -675,7 +685,154 @@ static void fmt_send(uint8_t *f, size_t n)
 		perror("mifmon: write umts_ipc0");
 }
 
-static void at_send(const char *cmd)
+/*
+ * AT proxy (-M): ModemManager talks to /dev/wwan0at0, whose other end is
+ * /dev/wwan_at_ctl (kernel wwan_at_bridge). mifmon owns umts_router and
+ * passes ModemManager's commands through; its own attach commands go in
+ * between, never in the middle of one of ModemManager's commands.
+ */
+static struct {
+	int fd;			/* /dev/wwan_at_ctl, -1 if not proxying */
+	int router;		/* umts_router */
+	int mm_pending;		/* MM command sent, final result not seen */
+	time_t mm_since;
+	char rx[2048];		/* CP output since MM's last command */
+	uint8_t q[4096];	/* MM input held while our command runs */
+	size_t qlen;
+	char own[160];		/* our command waiting for MM to finish */
+	int own_wait;
+	int own_active;		/* our command sent, final result not seen */
+} px = { .fd = -1, .router = -1 };
+
+static int at_final(const char *s)
+{
+	return strstr(s, "\r\nOK\r\n") || strstr(s, "ERROR") ||
+	       strstr(s, "\r\nNO CARRIER") || strstr(s, "\r\nCONNECT") ||
+	       strstr(s, "\r\nBUSY") || strstr(s, "\r\nNO ANSWER");
+}
+
+static void at_send_now(const char *cmd);
+
+/* MM may talk again: release what it queued, or run our waiting command */
+static void px_idle(void)
+{
+	if (px.own_active || px.mm_pending)
+		return;
+	if (px.own_wait) {
+		px.own_wait = 0;
+		at_send_now(px.own);
+		return;
+	}
+	if (px.qlen) {
+		if (write(px.router, px.q, px.qlen) < 0)
+			perror("mifmon: write umts_router");
+		px.qlen = 0;
+		px.mm_pending = 1;
+		px.mm_since = 0;
+		px.rx[0] = 0;
+	}
+}
+
+/*
+ * Commands this CP rejects but ModemManager needs to succeed, answered
+ * here instead. ATZ (reset to the stored profile) gets +CME ERROR: 100 and
+ * is the first command of ModemManager's enable sequence.
+ */
+static int px_local(const uint8_t *p, size_t n)
+{
+	static const char *const ok_cmds[] = { "ATZ", "ATZ0" };
+	char cmd[16];
+	size_t i, len = 0;
+
+	for (i = 0; i < n && len < sizeof(cmd) - 1; i++)
+		if (p[i] != '\r' && p[i] != '\n')
+			cmd[len++] = toupper(p[i]);
+	cmd[len] = 0;
+	if (i < n || len == n)
+		return 0;	/* too long, or not a full command line */
+	for (i = 0; i < sizeof(ok_cmds) / sizeof(ok_cmds[0]); i++) {
+		if (!strcmp(cmd, ok_cmds[i])) {
+			static const char ok[] = "\r\nOK\r\n";
+
+			if (write(px.fd, ok, sizeof(ok) - 1) < 0)
+				perror("mifmon: write wwan_at_ctl");
+			stamp();
+			printf("MM %s answered locally\n", cmd);
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/* bytes from ModemManager */
+static void px_mm_rx(const uint8_t *p, size_t n)
+{
+	if (!px.mm_pending && !px.own_active && !px.own_wait && px_local(p, n))
+		return;
+	if (px.own_active || px.own_wait) {
+		if (px.qlen + n <= sizeof(px.q)) {
+			memcpy(px.q + px.qlen, p, n);
+			px.qlen += n;
+		}
+		return;
+	}
+	if (write(px.router, p, n) < 0)
+		perror("mifmon: write umts_router");
+	if (!px.mm_pending)
+		px.rx[0] = 0;
+	px.mm_pending = 1;
+	px.mm_since = 0;
+}
+
+/*
+ * CP output while our own command runs: our commands (CGDCONT, CGATT)
+ * print no "+..." lines except errors, so any other "+..." line is a URC
+ * (+CREG/+CGREG/+CEREG, +CMTI, +CUSD, ...) and goes to ModemManager.
+ */
+static void px_forward_urcs(const uint8_t *p, size_t n)
+{
+	size_t i = 0, start, end;
+
+	if (px.fd < 0)
+		return;
+	while (i < n) {
+		while (i < n && (p[i] == '\r' || p[i] == '\n'))
+			i++;
+		start = i;
+		while (i < n && p[i] != '\r' && p[i] != '\n')
+			i++;
+		end = i;
+		if (end > start && p[start] == '+' &&
+		    !(end - start >= 10 && !memcmp(p + start, "+CME ERROR", 10))) {
+			if (write(px.fd, "\r\n", 2) < 0 ||
+			    write(px.fd, p + start, end - start) < 0 ||
+			    write(px.fd, "\r\n", 2) < 0)
+				perror("mifmon: write wwan_at_ctl");
+		}
+	}
+}
+
+/* CP output not belonging to our own command: to ModemManager */
+static void px_cp_rx(const uint8_t *p, size_t n)
+{
+	size_t have = strlen(px.rx);
+
+	if (px.fd >= 0 && write(px.fd, p, n) < 0)
+		perror("mifmon: write wwan_at_ctl");
+	if (!px.mm_pending)
+		return;		/* URC */
+	if (have + n >= sizeof(px.rx))
+		have = 0;
+	memcpy(px.rx + have, p, n);
+	px.rx[have + n] = 0;
+	if (at_final(px.rx)) {
+		px.mm_pending = 0;
+		px.rx[0] = 0;
+		px_idle();
+	}
+}
+
+static void at_send_now(const char *cmd)
 {
 	char line[256];
 
@@ -683,8 +840,20 @@ static void at_send(const char *cmd)
 	stamp();
 	printf("ROUTER tx \"%s\\r\"\n", cmd);
 	dc.at_rx[0] = 0;
+	px.own_active = 1;
 	if (write(dc.at_fd, line, strlen(line)) < 0)
 		perror("mifmon: write umts_router");
+}
+
+static void at_send(const char *cmd)
+{
+	if (px.mm_pending) {
+		/* after ModemManager's command completes */
+		snprintf(px.own, sizeof(px.own), "%s", cmd);
+		px.own_wait = 1;
+		return;
+	}
+	at_send_now(cmd);
 }
 
 static time_t now_s(void)
@@ -701,14 +870,44 @@ static time_t now_s(void)
  * CGATT); an AT-activated context is not routed to rmnet, so the data
  * call itself goes over Samsung IPC (define + activate).
  */
+static void dc_send_define(void)
+{
+	uint8_t f[134] = { 0 };
+
+	f[4] = 0x0d; f[5] = 0x01; f[6] = 3;
+	f[7] = 1;
+	f[8] = dc.cid;
+	f[9] = 6;	/* IPv4v6 (RIL DataProtocol 3) */
+	strncpy((char *)f + 10, dc.apn, 100);
+	dc.step = DC_DEFINE;
+	dc.deadline = now_s() + 20;
+	fmt_send(f, 134);
+}
+
+static void dc_send_activate(void)
+{
+	uint8_t f[112] = { 0 };
+
+	f[4] = 0x0d; f[5] = 0x04; f[6] = 3;
+	f[7] = 1;
+	f[8] = dc.cid;
+	dc.step = DC_ACTIVATE;
+	dc.deadline = now_s() + 20;
+	fmt_send(f, 112);
+}
+
 static void dc_next(void)
 {
-	uint8_t f[134];
+	uint8_t f[10] = { 0 };
 	char cmd[160];
 
-	memset(f, 0, sizeof(f));
 	switch (dc.step) {
-	case DC_OFF:		/* initial-attach context */
+	case DC_OFF:
+		if (dc.ipc_attach) {
+			dc_send_define();
+			break;
+		}
+		/* initial-attach context */
 		snprintf(cmd, sizeof(cmd), "AT+CGDCONT=%u,\"IPV4V6\",\"%s\"",
 			 dc.cid, dc.apn);
 		dc.step = DC_AT_CGDCONT;
@@ -721,22 +920,22 @@ static void dc_next(void)
 		at_send("AT+CGATT=1");
 		break;
 	case DC_AT_CGATT:	/* define the context over IPC */
-		f[4] = 0x0d; f[5] = 0x01; f[6] = 3;
-		f[7] = 1;
-		f[8] = dc.cid;
-		f[9] = 6;	/* IPv4v6 (RIL DataProtocol 3) */
-		strncpy((char *)f + 10, dc.apn, 100);
-		dc.step = DC_DEFINE;
-		dc.deadline = now_s() + 20;
-		fmt_send(f, 134);
+		dc_send_define();
 		break;
-	case DC_DEFINE:		/* activate */
-		f[4] = 0x0d; f[5] = 0x04; f[6] = 3;
+	case DC_DEFINE:
+		if (!dc.ipc_attach) {
+			dc_send_activate();
+			break;
+		}
+		/* GPRS_PS attach over IPC */
+		f[4] = 0x0d; f[5] = 0x03; f[6] = 3;
 		f[7] = 1;
-		f[8] = dc.cid;
-		dc.step = DC_ACTIVATE;
+		dc.step = DC_PS_ATTACH;
 		dc.deadline = now_s() + 20;
-		fmt_send(f, 112);
+		fmt_send(f, 10);
+		break;
+	case DC_PS_ATTACH:
+		dc_send_activate();
 		break;
 	default:
 		break;
@@ -755,19 +954,25 @@ static void dc_at_rx(const uint8_t *p, size_t n)
 	memcpy(dc.at_rx + have, p, n);
 	dc.at_rx[have + n] = 0;
 	if (strstr(dc.at_rx, "\r\nOK\r\n")) {
+		px.own_active = 0;
 		dc_next();
+		px_idle();
 	} else if (strstr(dc.at_rx, "ERROR")) {
+		px.own_active = 0;
 		stamp();
 		printf("DATA attach step failed, retrying in 10 s\n");
 		dc.step = DC_AT_CGDCONT;	/* retry CGATT */
 		dc.deadline = now_s() + 10;
 		dc.at_rx[0] = 0;
+		px_idle();
 	}
 }
 
 /* start over (CP rebooted, or a step got no answer) after delay seconds */
 static void dc_restart(int delay)
 {
+	px.own_active = 0;
+	px.own_wait = 0;
 	dc.step = DC_OFF;
 	dc.deadline = now_s() + delay;
 }
@@ -783,11 +988,18 @@ static void dc_tick(void)
 		break;
 	case DC_AT_CGDCONT:
 	case DC_AT_CGATT:
+		px.own_active = 0;
 		stamp();
 		printf("DATA no attach yet, retrying\n");
 		dc.step = dc.step == DC_AT_CGATT ? DC_AT_CGDCONT : DC_OFF;
 		dc_next();
 		break;
+	case DC_PS_ATTACH:
+		if (dc.ipc_attach) {
+			dc_next();	/* retry the activate */
+			break;
+		}
+		/* fall through */
 	case DC_DEFINE:
 	case DC_ACTIVATE:
 		stamp();
@@ -855,11 +1067,19 @@ static void dc_rx(const uint8_t *p, size_t n)
 
 		stamp();
 		printf("DATA 0d%02x -> 0x%04x\n", p[8], code);
-		if (p[8] == 0x01 && dc.step == DC_DEFINE)
-			dc_next();
+		if ((p[8] == 0x01 && dc.step == DC_DEFINE) ||
+		    (p[8] == 0x03 && dc.step == DC_PS_ATTACH))
+			dc_next();	/* attach: 0x8005 = already attached */
 		else if (p[8] == 0x04 && dc.step == DC_ACTIVATE && code != 0x8000) {
-			printf("DATA activate refused (-c/-A right?), retrying in 30 s\n");
-			dc_restart(30);
+			if (dc.ipc_attach) {
+				/* not attached yet: try the activate again */
+				printf("DATA activate refused, not attached yet? retrying in 10 s\n");
+				dc.step = DC_PS_ATTACH;
+				dc.deadline = now_s() + 10;
+			} else {
+				printf("DATA activate refused (-c/-A right?), retrying in 30 s\n");
+				dc_restart(30);
+			}
 		}
 	} else if (p[4] == 0x0d && p[5] == 0x09) {
 		dc_ip_config(p, n);
@@ -877,24 +1097,30 @@ static void dc_rx(const uint8_t *p, size_t n)
 int main(int argc, char **argv)
 {
 	static uint8_t buf[BUF_SIZE];
-	const char *at_cmd = NULL, *fmt_hex = NULL;
-	struct pollfd pfd[3];
-	int opt, i, data = 0;
+	const char *at_cmd = NULL, *fmt_hex[8];
+	int nfmt = 0;
+	struct pollfd pfd[4];
+	int opt, i, data = 0, proxy = 0;
 
 	dc.cid = 1;
 	dc.apn = "";
 	dc.mseq = 0x40;
 	rfs.efs = "/var/lib/android-modem/efs";
-	while ((opt = getopt(argc, argv, "a:f:dc:A:s:re:")) != -1) {
+	while ((opt = getopt(argc, argv, "a:f:dIc:A:s:re:M")) != -1) {
 		switch (opt) {
 		case 'a': at_cmd = optarg; break;
-		case 'f': fmt_hex = optarg; break;
+		case 'f':
+			if (nfmt < 8)
+				fmt_hex[nfmt++] = optarg;
+			break;
 		case 'd': data = 1; break;
+		case 'I': data = 1; dc.ipc_attach = 1; break;
 		case 'c': dc.cid = atoi(optarg); break;
 		case 'A': dc.apn = optarg; break;
 		case 's': dc.hook = optarg; break;
 		case 'r': rfs.buf = malloc(RFS_MAX); break;
 		case 'e': rfs.efs = optarg; break;
+		case 'M': proxy = 1; break;
 		default:
 			fprintf(stderr, "usage: %s [-a AT-command] [-f hex-fmt-frame]"
 				" [-d [-c cid] [-A apn] [-s hook]] [-r [-e efs]]\n", argv[0]);
@@ -910,14 +1136,18 @@ int main(int argc, char **argv)
 
 	pfd[0].fd = open_dev("/dev/umts_ipc0");
 	pfd[1].fd = open_dev("/dev/umts_rfs0");
-	pfd[2].fd = open_dev("/dev/umts_router");
-	for (i = 0; i < 3; i++)
+	/* -I leaves the AT port to ModemManager */
+	pfd[2].fd = dc.ipc_attach && !at_cmd && !proxy ? -1 : open_dev("/dev/umts_router");
+	pfd[3].fd = proxy ? open_dev("/dev/wwan_at_ctl") : -1;
+	px.fd = pfd[3].fd;
+	px.router = pfd[2].fd;
+	for (i = 0; i < 4; i++)
 		pfd[i].events = POLLIN;
 	if (pfd[0].fd < 0 || pfd[1].fd < 0)
 		return 1;
 
-	if (fmt_hex) {
-		size_t n = parse_hex(fmt_hex, buf, sizeof(buf));
+	for (i = 0; i < nfmt; i++) {
+		size_t n = parse_hex(fmt_hex[i], buf, sizeof(buf));
 
 		show_fmt("tx", buf, n);
 		if (write(pfd[0].fd, buf, n) < 0)
@@ -926,7 +1156,7 @@ int main(int argc, char **argv)
 	dc.fd = pfd[0].fd;
 	dc.at_fd = pfd[2].fd;
 	rfs.fd = pfd[1].fd;
-	if (data && dc.at_fd < 0) {
+	if (data && !dc.ipc_attach && dc.at_fd < 0) {
 		fprintf(stderr, "mifmon: -d needs /dev/umts_router\n");
 		return 1;
 	}
@@ -943,13 +1173,22 @@ int main(int argc, char **argv)
 	for (;;) {
 		if (data)
 			dc_tick();
-		if (poll(pfd, 3, data ? 2000 : -1) < 0) {
+		if (px.mm_pending && px.own_wait) {
+			/* MM never got a final result: do not block our attach */
+			if (!px.mm_since)
+				px.mm_since = now_s();
+			else if (now_s() - px.mm_since > 30) {
+				px.mm_pending = 0;
+				px_idle();
+			}
+		}
+		if (poll(pfd, 4, data || proxy ? 2000 : -1) < 0) {
 			if (errno == EINTR)
 				continue;
 			perror("mifmon: poll");
 			return 1;
 		}
-		for (i = 0; i < 3; i++) {
+		for (i = 0; i < 4; i++) {
 			ssize_t n;
 
 			if (pfd[i].fd < 0 || !pfd[i].revents)
@@ -972,10 +1211,16 @@ int main(int argc, char **argv)
 					rfs_rx(buf, n);
 				else
 					show_rfs("rx", buf, n);
-			} else {
+			} else if (i == 2) {
 				show_raw("ROUTER", buf, n);
-				if (data)
+				if (data && px.own_active) {
+					px_forward_urcs(buf, n);
 					dc_at_rx(buf, n);
+				} else
+					px_cp_rx(buf, n);
+			} else {
+				show_raw("MM", buf, n);
+				px_mm_rx(buf, n);
 			}
 		}
 	}

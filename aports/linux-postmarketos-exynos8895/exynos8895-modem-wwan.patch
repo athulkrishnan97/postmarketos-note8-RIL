@@ -1,0 +1,253 @@
+From: postmarketos-note8 <noreply@postmarketos-note8>
+Subject: [PATCH] modem_v1: WWAN AT port for ModemManager, served from userspace
+
+The Shannon CP has one AT channel (umts_router), and the RIL side needs
+it too: the CP attaches to LTE only after AT+CGDCONT/AT+CGATT, and any
+Samsung IPC data setup sent before that wedges its AT engine. So the RIL
+helper (mifmon) keeps umts_router and proxies a WWAN AT port:
+
+  ModemManager <-> /dev/wwan0at0 <-> /dev/wwan_at_ctl <-> mifmon -M
+
+The WWAN device's parent is the modem platform device (mif_pdata), so
+ModemManager sees a platform modem. The port is created from a late
+initcall: the modem driver probes before the WWAN core registers its
+class.
+
+diff -urN a/drivers/misc/modem_v1/Kconfig b/drivers/misc/modem_v1/Kconfig
+--- a/drivers/misc/modem_v1/Kconfig
++++ b/drivers/misc/modem_v1/Kconfig
+@@ -3,6 +3,7 @@
+ 	bool "Samsung SIPC modem interface (Exynos integrated Shannon CP)"
+ 	depends on ARCH_EXYNOS && OF && NET
+ 	depends on EXYNOS_PMU
++	depends on WWAN=y || WWAN=n
+ 	help
+ 	  Samsung's modem interface driver for the Shannon cellular
+ 	  processor (CP) integrated in Exynos SoCs such as the Exynos 8895.
+diff -urN a/drivers/misc/modem_v1/Makefile b/drivers/misc/modem_v1/Makefile
+--- a/drivers/misc/modem_v1/Makefile
++++ b/drivers/misc/modem_v1/Makefile
+@@ -12,3 +12,4 @@
+ 	      link_device_memory_flow_control.o link_device_memory_debug.o \
+ 	      link_device_memory_sbd.o modem_notifier.o \
+ 	      modem_ctrl_ss310ap.o
++modem_if-$(CONFIG_WWAN) += wwan_at_bridge.o
+diff -urN a/drivers/misc/modem_v1/modem_main.c b/drivers/misc/modem_v1/modem_main.c
+--- a/drivers/misc/modem_v1/modem_main.c
++++ b/drivers/misc/modem_v1/modem_main.c
+@@ -854,6 +854,13 @@
+ 	if (sysfs_create_groups(&dev->kobj, modem_groups))
+ 		mif_err("failed to create modem groups node\n");
+ 
++#if IS_ENABLED(CONFIG_WWAN)
++	/* AT port for ModemManager, served by mifmon (wwan_at_bridge.c) */
++	err = mif_wwan_at_bridge_init(dev);
++	if (err)
++		mif_err("WWAN AT bridge failed (%d)\n", err);
++#endif
++
+ 	err = mif_init_argos_notifier();
+ 	if (err < 0)
+ 		mif_err("failed to initialize argos_notifier(%d)\n", err);
+diff -urN a/drivers/misc/modem_v1/modem_prj.h b/drivers/misc/modem_v1/modem_prj.h
+--- a/drivers/misc/modem_v1/modem_prj.h
++++ b/drivers/misc/modem_v1/modem_prj.h
+@@ -775,6 +775,7 @@
+ }
+ 
+ int sipc5_init_io_device(struct io_device *iod);
++int mif_wwan_at_bridge_init(struct device *parent);
+ void sipc5_deinit_io_device(struct io_device *iod);
+ 
+ #if defined(CONFIG_RPS) && defined(CONFIG_ARGOS)
+diff -urN a/drivers/misc/modem_v1/wwan_at_bridge.c b/drivers/misc/modem_v1/wwan_at_bridge.c
+--- a/drivers/misc/modem_v1/wwan_at_bridge.c
++++ b/drivers/misc/modem_v1/wwan_at_bridge.c
+@@ -0,0 +1,187 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * WWAN AT port for the Shannon CP, served from userspace.
++ *
++ * The CP has a single AT channel (umts_router) and the RIL side (mifmon)
++ * needs it too: the CP attaches to LTE only after AT+CGDCONT/AT+CGATT and
++ * any Samsung IPC data setup sent before that wedges its AT engine. So
++ * mifmon keeps umts_router and proxies a WWAN AT port for ModemManager:
++ *
++ *   ModemManager <-> /dev/wwan0at0 <-> /dev/wwan_at_ctl <-> mifmon
++ *                                                  <-> /dev/umts_router
++ *
++ * Bytes ModemManager writes to the WWAN port are read from wwan_at_ctl;
++ * bytes written to wwan_at_ctl are delivered to ModemManager. The WWAN
++ * device's parent is the modem's platform device.
++ */
++#include <linux/fs.h>
++#include <linux/miscdevice.h>
++#include <linux/module.h>
++#include <linux/poll.h>
++#include <linux/skbuff.h>
++#include <linux/wait.h>
++#include <linux/wwan.h>
++
++#include "modem_prj.h"
++
++#define CTL_MAX_QUEUED	64
++
++static struct {
++	struct device *parent;
++	struct wwan_port *port;
++	struct sk_buff_head txq;	/* ModemManager -> mifmon */
++	wait_queue_head_t wq;
++	atomic_t ctl_open;
++} br;
++
++static int br_port_start(struct wwan_port *port)
++{
++	return 0;
++}
++
++static void br_port_stop(struct wwan_port *port)
++{
++}
++
++static int br_port_tx(struct wwan_port *port, struct sk_buff *skb)
++{
++	if (!atomic_read(&br.ctl_open) || skb_queue_len(&br.txq) >= CTL_MAX_QUEUED) {
++		/* nobody serving the port: drop, ModemManager times out */
++		consume_skb(skb);
++		return 0;
++	}
++	skb_queue_tail(&br.txq, skb);
++	wake_up_interruptible(&br.wq);
++	return 0;
++}
++
++static const struct wwan_port_ops br_port_ops = {
++	.start = br_port_start,
++	.stop = br_port_stop,
++	.tx = br_port_tx,
++};
++
++static int ctl_open(struct inode *inode, struct file *filp)
++{
++	if (atomic_cmpxchg(&br.ctl_open, 0, 1))
++		return -EBUSY;
++	skb_queue_purge(&br.txq);
++	return 0;
++}
++
++static int ctl_release(struct inode *inode, struct file *filp)
++{
++	atomic_set(&br.ctl_open, 0);
++	skb_queue_purge(&br.txq);
++	return 0;
++}
++
++static ssize_t ctl_read(struct file *filp, char __user *buf, size_t count,
++			loff_t *ppos)
++{
++	struct sk_buff *skb;
++	size_t n;
++	int ret;
++
++	ret = wait_event_interruptible(br.wq, !skb_queue_empty(&br.txq) ||
++				       (filp->f_flags & O_NONBLOCK));
++	if (ret)
++		return ret;
++	skb = skb_dequeue(&br.txq);
++	if (!skb)
++		return -EAGAIN;
++
++	n = min_t(size_t, count, skb->len);
++	if (copy_to_user(buf, skb->data, n)) {
++		skb_queue_head(&br.txq, skb);
++		return -EFAULT;
++	}
++	skb_pull(skb, n);
++	if (skb->len)
++		skb_queue_head(&br.txq, skb);	/* rest on the next read */
++	else
++		consume_skb(skb);
++	return n;
++}
++
++static ssize_t ctl_write(struct file *filp, const char __user *buf,
++			 size_t count, loff_t *ppos)
++{
++	struct sk_buff *skb;
++
++	if (!count)
++		return 0;
++	count = min_t(size_t, count, 4096);
++	skb = alloc_skb(count, GFP_KERNEL);
++	if (!skb)
++		return -ENOMEM;
++	if (copy_from_user(skb_put(skb, count), buf, count)) {
++		kfree_skb(skb);
++		return -EFAULT;
++	}
++	if (!br.port) {
++		kfree_skb(skb);
++		return -ENODEV;
++	}
++	wwan_port_rx(br.port, skb);
++	return count;
++}
++
++static __poll_t ctl_poll(struct file *filp, poll_table *wait)
++{
++	poll_wait(filp, &br.wq, wait);
++	return (skb_queue_empty(&br.txq) ? 0 : EPOLLIN | EPOLLRDNORM) |
++	       EPOLLOUT | EPOLLWRNORM;
++}
++
++static const struct file_operations ctl_fops = {
++	.owner = THIS_MODULE,
++	.open = ctl_open,
++	.release = ctl_release,
++	.read = ctl_read,
++	.write = ctl_write,
++	.poll = ctl_poll,
++	.llseek = noop_llseek,
++};
++
++static struct miscdevice ctl_misc = {
++	.minor = MISC_DYNAMIC_MINOR,
++	.name = "wwan_at_ctl",
++	.fops = &ctl_fops,
++};
++
++/*
++ * Called from modem_probe. The modem driver (drivers/misc) probes before
++ * the WWAN core (drivers/net/wwan) has registered its class, so the port
++ * itself is created from a late initcall.
++ */
++int mif_wwan_at_bridge_init(struct device *parent)
++{
++	int ret;
++
++	skb_queue_head_init(&br.txq);
++	init_waitqueue_head(&br.wq);
++
++	ret = misc_register(&ctl_misc);
++	if (ret)
++		return ret;
++	br.parent = parent;
++	return 0;
++}
++
++static int __init mif_wwan_at_bridge_late(void)
++{
++	struct wwan_port *port;
++
++	if (!br.parent)
++		return 0;
++	port = wwan_create_port(br.parent, WWAN_PORT_AT, &br_port_ops, NULL,
++				NULL);
++	if (IS_ERR(port)) {
++		pr_err("mif: WWAN AT port failed (%ld)\n", PTR_ERR(port));
++		return PTR_ERR(port);
++	}
++	br.port = port;
++	return 0;
++}
++late_initcall(mif_wwan_at_bridge_late);

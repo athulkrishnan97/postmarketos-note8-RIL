@@ -4,7 +4,7 @@ maintainer="Jonas Heinrich <onny@project-insanity.org>"
 _flavor="postmarketos-exynos8895"
 pkgname=linux-$_flavor
 pkgver=7.0
-pkgrel=13
+pkgrel=14
 pkgdesc="Close-to-mainline kernel for Samsung Exynos 8895 devices"
 arch="aarch64"
 _carch="arm64"
@@ -70,6 +70,7 @@ source="
 	exynos8895-cpu-stock-volts.patch
 	exynos8895-charging.patch
 	exynos8895-modem.patch
+	exynos8895-modem-wwan.patch
 	greatlte-secure-world.patch
 "
 
@@ -132,5 +133,6 @@ d984fc9f5fe182a7e2be83f1dd7a7f40ff475dee81fe5a0b871da2ee1660a6bae4b83e33dd88d9c0
 78eeb4b763374683f8959ef13850eb4670407c123ed1cc202b5c5ec94587148190919ee8fbe547e94b46fc5b7a7c5412314de15848841694ccc72a58802a091c  exynos8895-cpu-stock-volts.patch
 1b2a08ded8f38bd77d9cb29c2f2b685928d5367e463cc3d21aa8f7204bfffab08651b76a6ed70959f93dce90bce9cc990d26b5689c86f65e23316bb57a21ac4f  exynos8895-charging.patch
 03eef4f514a76691da6b20974f064164c50929e1c3833709f3fec8825054f119eba2cb912692b319e1e44cb6ee38af946f1087d3e88797909fe25e2dc2c8f55c  exynos8895-modem.patch
+606998771a79fc7a894ac71923d3fd9443b2ca5e6fa6438f4fbb25aff01e4de0b18691c999c7b1d4d78b72539655e934d858f88809611370cd7a097396d5d392  exynos8895-modem-wwan.patch
 e275302b5b98b4f84234f194025565d3ad1d66592fe91b877290adbd5b5ba072f3bd4b59956e5d3361e98966ac609096cdca49cb323961e91ea986530a0abcde  greatlte-secure-world.patch
 "
