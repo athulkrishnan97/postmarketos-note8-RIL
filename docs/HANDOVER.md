@@ -613,3 +613,9 @@ Plan: docs/RIL-PLAN.md. Test sequence for the phone: docs/RIL-BRINGUP.md.
   the secure OS only runs when the NWd driver schedules it (nq/yield SMCs). Mainline never
   starts it. Candidate explanation: monitor services that synchronise with the SWd block
   forever. Freeze tests stopped here; further work is research (see RIL-PLAN / this file).
+- 2026-10-10 10:33: smcprobe5 kinfo=1 step=1 (CPU 0): Kinibi MC_FC_INFO(0xFF000002, 0) - the
+  first, read-only call of the stock MobiCore init - ALSO froze the SoC (log ends at
+  "SMC MC_FC_INFO(MCI_VERSION) ..."). Anything that enters the secure world hangs; only PSCI
+  and 0x82000501 return. Initialising Kinibi from Linux is blocked at its first call.
+  Next: boot TWRP (Samsung-derived kernel with drivers/gud built in) and read its dmesg for
+  MobiCore/t-base init, to tell "our boot chain breaks the SWd" from "SWd dead for everyone".

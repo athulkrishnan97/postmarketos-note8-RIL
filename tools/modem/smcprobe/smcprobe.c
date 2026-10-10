@@ -10,6 +10,7 @@
  *
  *   insmod smcprobe.ko            SMC reads only (default)
  *   insmod smcprobe.ko write=1    also write CP_CTRL_NS back unchanged
+ *   insmod smcprobe.ko kinfo=1 step=1 only query the Kinibi secure OS state
  *   insmod smcprobe.ko seh=1 step=1   only register an EL3 exception handler
  *   insmod smcprobe.ko seh=1          register it, then read CP_CTRL
  *   (with seh=1 the module stays loaded for good; reboot to remove it)
@@ -58,6 +59,19 @@ MODULE_PARM_DESC(pmu, "also read CP_STAT/RESET_SEQ directly (non-secure)");
 static bool seh;
 module_param(seh, bool, 0444);
 MODULE_PARM_DESC(seh, "register an EL3 smart exception handler first");
+
+/*
+ * Trustonic Kinibi (the secure OS on stock firmware) status query, the
+ * first call Samsung's MobiCore driver makes (drivers/gud, nq_start):
+ * MC_FC_INFO(0xFF000002, ext_info_id) -> x1 = ret, x2 = state, x3 = info.
+ * state: 0 not initialized, 1 bad init, 2 initialized, 3 halt.
+ */
+#define MC_FC_INFO		0xFF000002
+#define MC_EXT_INFO_ID_MCI_VERSION	0
+
+static bool kinfo;
+module_param(kinfo, bool, 0444);
+MODULE_PARM_DESC(kinfo, "query the Kinibi secure OS state (MC_FC_INFO) first");
 
 static int step = 2;
 module_param(step, int, 0444);
@@ -119,6 +133,15 @@ static int __init smcprobe_init(void)
 
 	say("smcprobe: running on CPU %d (MPIDR %llx)\n", raw_smp_processor_id(),
 		read_cpuid_mpidr());
+	if (kinfo) {
+		struct arm_smccc_res res;
+
+		say("smcprobe: SMC MC_FC_INFO(MCI_VERSION) ...\n");
+		arm_smccc_smc(MC_FC_INFO, MC_EXT_INFO_ID_MCI_VERSION, 0, 0, 0, 0, 0, 0,
+			      &res);
+		pr_info("smcprobe: MC_FC_INFO -> resp=0x%lx ret=0x%lx state=0x%lx info=0x%lx\n",
+			res.a0, res.a1, res.a2, res.a3);
+	}
 	if (seh) {
 		struct arm_smccc_res res;
 
