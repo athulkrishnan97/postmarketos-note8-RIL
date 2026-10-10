@@ -604,3 +604,12 @@ Plan: docs/RIL-PLAN.md. Test sequence for the phone: docs/RIL-BRINGUP.md.
   ~52 MiB CMA used at idle). Size 40,298,496 (BOOT is 41,943,040). Flashed remotely
   (reboot-download + heimdall from the laptop). smcprobe4 seh=1 step=1 STILL froze inside
   SMC -123 -> TIMA/CMA overlap is NOT the cause. v182 remains the known-good image.
+- 2026-10-10 10:31: USB (dwc3, irq 49) is handled on CPU 0 only, so a CPU-0-only hang would
+  also kill the link. Re-ran smcprobe4 seh=1 step=1 pinned to CPU 3 (MPIDR 0x80000002, a big
+  core): log ends at "SMC SET_SEH_ADDRESS ...", then nothing - no ping, no soft/hard lockup
+  report from the other CPUs. The SMC stops the WHOLE SoC, from any core.
+- Kinibi (Trustonic TEE) context: stock builds drivers/gud/gud-exynos8895_kinibi400; CPU_IDS
+  for 8895 = {0x100..0x103, 0x0..0x3} (logical 0-3 = A53, 4-7 = M2 in stock numbering);
+  the secure OS only runs when the NWd driver schedules it (nq/yield SMCs). Mainline never
+  starts it. Candidate explanation: monitor services that synchronise with the SWd block
+  forever. Freeze tests stopped here; further work is research (see RIL-PLAN / this file).
