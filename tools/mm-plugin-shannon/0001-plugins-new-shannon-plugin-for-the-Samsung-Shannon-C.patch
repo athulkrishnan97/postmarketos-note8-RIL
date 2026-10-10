@@ -1,0 +1,762 @@
+From f8dbd39ade99c0fdc45df07a238204bd96da7e5d Mon Sep 17 00:00:00 2001
+From: postmarketos-note8 <noreply@postmarketos-note8>
+Date: Sat, 10 Oct 2026 15:52:20 +0000
+Subject: [PATCH] plugins: new 'shannon' plugin for the Samsung Shannon CP of
+ Exynos SoCs
+
+The integrated Shannon CP of Exynos SoCs (e.g. Exynos 8895, Galaxy Note 8)
+on a mainline kernel with the modem_v1 driver (mif_sipc5): one AT port on
+the WWAN subsystem and raw-IP rmnet net ports. A PDP context reaches rmnet
+only when it is set up over Samsung IPC; the userspace helper that owns
+IPC serves the AT port and implements AT+CGACT=1/0, AT+CGACT? and
+AT+CGCONTRDP for that call. The bearer activates with +CGACT, configures
+the net port statically from +CGCONTRDP and never uses PPP.
+---
+ meson.build                                   |   1 +
+ meson_options.txt                             |   1 +
+ src/plugins/meson.build                       |  14 +
+ src/plugins/mm-builtin-plugins.c              |   6 +
+ .../shannon/mm-broadband-bearer-shannon.c     | 347 ++++++++++++++++++
+ .../shannon/mm-broadband-bearer-shannon.h     |  50 +++
+ .../shannon/mm-broadband-modem-shannon.c      | 111 ++++++
+ .../shannon/mm-broadband-modem-shannon.h      |  42 +++
+ src/plugins/shannon/mm-plugin-shannon.c       |  76 ++++
+ 9 files changed, 648 insertions(+)
+ create mode 100644 src/plugins/shannon/mm-broadband-bearer-shannon.c
+ create mode 100644 src/plugins/shannon/mm-broadband-bearer-shannon.h
+ create mode 100644 src/plugins/shannon/mm-broadband-modem-shannon.c
+ create mode 100644 src/plugins/shannon/mm-broadband-modem-shannon.h
+ create mode 100644 src/plugins/shannon/mm-plugin-shannon.c
+
+diff --git a/meson.build b/meson.build
+index f81e597..38442d4 100644
+--- a/meson.build
++++ b/meson.build
+@@ -365,6 +365,7 @@ plugins_options_reqs = {
+   'huawei': {'available': true, 'shared': []},
+   'intel': {'available': true, 'shared': ['xmm']},
+   'iridium': {'available': true, 'shared': []},
++  'shannon': {'available': true, 'shared': []},
+   'linktop': {'available': true, 'shared': []},
+   'longcheer': {'available': true, 'shared': []},
+   'mbm': {'available': true, 'shared': []},
+diff --git a/meson_options.txt b/meson_options.txt
+index 6fbc066..a652009 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -42,6 +42,7 @@ option('plugin_haier', type: 'feature', value: 'auto', description: 'enable haie
+ option('plugin_huawei', type: 'feature', value: 'auto', description: 'enable huawei plugin support')
+ option('plugin_intel', type: 'feature', value: 'auto', description: 'enable intel plugin support')
+ option('plugin_iridium', type: 'feature', value: 'auto', description: 'enable iridium plugin support')
++option('plugin_shannon', type: 'feature', value: 'auto', description: 'enable Samsung Shannon (Exynos) plugin support')
+ option('plugin_linktop', type: 'feature', value: 'auto', description: 'enable linktop plugin support')
+ option('plugin_longcheer', type: 'feature', value: 'auto', description: 'enable longcheer plugin support')
+ option('plugin_mbm', type: 'feature', value: 'auto', description: 'enable mbm plugin support')
+diff --git a/src/plugins/meson.build b/src/plugins/meson.build
+index 97f0b6a..66e34a4 100644
+--- a/src/plugins/meson.build
++++ b/src/plugins/meson.build
+@@ -652,6 +652,20 @@ if plugins_options['iridium']
+   }}
+ endif
+ 
++# plugin: shannon
++if plugins_options['shannon']
++  sources = files(
++    'shannon/mm-broadband-bearer-shannon.c',
++    'shannon/mm-broadband-modem-shannon.c',
++    'shannon/mm-plugin-shannon.c',
++  )
++
++  plugins += {'plugin-shannon': {
++    'plugin': true,
++    'module': {'sources': sources, 'include_directories': plugins_incs, 'c_args': '-DMM_MODULE_NAME="shannon"'},
++  }}
++endif
++
+ # plugin: linktop
+ if plugins_options['linktop']
+   test_udev_rules_dir_c_args = ['-DTESTUDEVRULESDIR_LINKTOP="@0@"'.format(plugins_dir / 'linktop')]
+diff --git a/src/plugins/mm-builtin-plugins.c b/src/plugins/mm-builtin-plugins.c
+index c7f9163..8b26736 100644
+--- a/src/plugins/mm-builtin-plugins.c
++++ b/src/plugins/mm-builtin-plugins.c
+@@ -64,6 +64,9 @@ MMPlugin *mm_plugin_create_intel (void);
+ #if defined ENABLE_PLUGIN_IRIDIUM
+ MMPlugin *mm_plugin_create_iridium (void);
+ #endif
++#if defined ENABLE_PLUGIN_SHANNON
++MMPlugin *mm_plugin_create_shannon (void);
++#endif
+ #if defined ENABLE_PLUGIN_LINKTOP
+ MMPlugin *mm_plugin_create_linktop (void);
+ #endif
+@@ -202,6 +205,9 @@ mm_builtin_plugins_load (void)
+ #if defined ENABLE_PLUGIN_IRIDIUM
+     PREPEND_PLUGIN (iridium);
+ #endif
++#if defined ENABLE_PLUGIN_SHANNON
++    PREPEND_PLUGIN (shannon);
++#endif
+ #if defined ENABLE_PLUGIN_LINKTOP
+     PREPEND_PLUGIN (linktop);
+ #endif
+diff --git a/src/plugins/shannon/mm-broadband-bearer-shannon.c b/src/plugins/shannon/mm-broadband-bearer-shannon.c
+new file mode 100644
+index 0000000..3f12437
+--- /dev/null
++++ b/src/plugins/shannon/mm-broadband-bearer-shannon.c
+@@ -0,0 +1,347 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
++/*
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * Bearer for the Samsung Shannon CP of Exynos SoCs, run without Samsung's
++ * RIL. The CP routes a PDP context to its rmnet interface only when the
++ * context is set up over Samsung IPC; the RIL-side helper (mifmon) owns
++ * that and serves the AT port ModemManager uses. It implements:
++ *
++ *   AT+CGACT=1,<cid>     set up the IPC data call, OK once it is up
++ *   AT+CGCONTRDP=<cid>   address, gateway and DNS of that call
++ *   AT+CGACT=0,<cid>     release it
++ *   AT+CGACT?            state of the IPC data call
++ *
++ * Data then flows as raw IP on the net port (rmnet0), statically
++ * configured.
++ */
++
++#include <config.h>
++
++#include <ModemManager.h>
++#define _LIBMM_INSIDE_MM
++#include <libmm-glib.h>
++
++#include "mm-base-modem-at.h"
++#include "mm-bind.h"
++#include "mm-broadband-bearer-shannon.h"
++#include "mm-log-object.h"
++#include "mm-modem-helpers.h"
++
++G_DEFINE_TYPE (MMBroadbandBearerShannon, mm_broadband_bearer_shannon, MM_TYPE_BROADBAND_BEARER)
++
++typedef struct {
++    MMBaseModem      *modem;
++    MMPort           *data;
++    guint             cid;
++    MMBearerIpConfig *ip_config;
++} ConnectContext;
++
++static void
++connect_context_free (ConnectContext *ctx)
++{
++    g_clear_object (&ctx->modem);
++    g_clear_object (&ctx->data);
++    g_clear_object (&ctx->ip_config);
++    g_slice_free (ConnectContext, ctx);
++}
++
++static GTask *
++connect_task_new (MMBroadbandBearerShannon *self,
++                  MMBaseModem              *modem,
++                  MMPort                   *data,
++                  guint                     cid,
++                  GCancellable             *cancellable,
++                  GAsyncReadyCallback       callback,
++                  gpointer                  user_data)
++{
++    ConnectContext *ctx;
++    GTask          *task;
++
++    ctx = g_slice_new0 (ConnectContext);
++    ctx->modem = g_object_ref (modem);
++    ctx->data = data ? g_object_ref (data) : NULL;
++    ctx->cid = cid;
++
++    task = g_task_new (self, cancellable, callback, user_data);
++    g_task_set_task_data (task, ctx, (GDestroyNotify) connect_context_free);
++    return task;
++}
++
++/*****************************************************************************/
++/* 3GPP IP config: +CGCONTRDP */
++
++static gboolean
++get_ip_config_3gpp_finish (MMBroadbandBearer  *self,
++                           GAsyncResult       *res,
++                           MMBearerIpConfig  **ipv4_config,
++                           MMBearerIpConfig  **ipv6_config,
++                           GError            **error)
++{
++    MMBearerIpConfig *ipv4;
++
++    ipv4 = g_task_propagate_pointer (G_TASK (res), error);
++    if (!ipv4)
++        return FALSE;
++    if (ipv4_config)
++        *ipv4_config = ipv4;
++    else
++        g_object_unref (ipv4);
++    if (ipv6_config)
++        *ipv6_config = NULL;
++    return TRUE;
++}
++
++static void
++cgcontrdp_ready (MMBaseModem  *modem,
++                 GAsyncResult *res,
++                 GTask        *task)
++{
++    MMBroadbandBearerShannon *self;
++    ConnectContext           *ctx;
++    const gchar              *response;
++    GError                   *error = NULL;
++    g_autofree gchar         *address = NULL;
++    g_autofree gchar         *subnet = NULL;
++    g_autofree gchar         *gateway = NULL;
++    gchar                    *dns[3] = { NULL, NULL, NULL };
++
++    self = g_task_get_source_object (task);
++    ctx = g_task_get_task_data (task);
++
++    response = mm_base_modem_at_command_finish (modem, res, &error);
++    if (!response || !mm_3gpp_parse_cgcontrdp_response (response,
++                                                        NULL, NULL, NULL,
++                                                        &address,
++                                                        &subnet,
++                                                        &gateway,
++                                                        &dns[0],
++                                                        &dns[1],
++                                                        &error)) {
++        g_task_return_error (task, error);
++        g_object_unref (task);
++        return;
++    }
++
++    mm_obj_dbg (self, "PDP context #%u: address %s, subnet %s, gateway %s",
++                ctx->cid, address, subnet ? subnet : "-", gateway ? gateway : "-");
++
++    ctx->ip_config = mm_bearer_ip_config_new ();
++    mm_bearer_ip_config_set_method (ctx->ip_config, MM_BEARER_IP_METHOD_STATIC);
++    mm_bearer_ip_config_set_address (ctx->ip_config, address);
++    mm_bearer_ip_config_set_prefix (ctx->ip_config, subnet ? mm_netmask_to_cidr (subnet) : 32);
++    if (gateway)
++        mm_bearer_ip_config_set_gateway (ctx->ip_config, gateway);
++    mm_bearer_ip_config_set_dns (ctx->ip_config, (const gchar **) dns);
++    g_free (dns[0]);
++    g_free (dns[1]);
++
++    g_task_return_pointer (task, g_object_ref (ctx->ip_config), g_object_unref);
++    g_object_unref (task);
++}
++
++static void
++get_ip_config_3gpp (MMBroadbandBearer   *self,
++                    MMBroadbandModem    *modem,
++                    MMPortSerialAt      *primary,
++                    MMPortSerialAt      *secondary,
++                    MMPort              *data,
++                    guint                cid,
++                    MMBearerIpFamily     ip_family,
++                    GAsyncReadyCallback  callback,
++                    gpointer             user_data)
++{
++    GTask            *task;
++    g_autofree gchar *cmd = NULL;
++
++    task = connect_task_new (MM_BROADBAND_BEARER_SHANNON (self), MM_BASE_MODEM (modem),
++                             data, cid, NULL, callback, user_data);
++
++    cmd = g_strdup_printf ("+CGCONTRDP=%u", cid);
++    mm_base_modem_at_command (MM_BASE_MODEM (modem),
++                              cmd,
++                              10,
++                              FALSE,
++                              (GAsyncReadyCallback) cgcontrdp_ready,
++                              task);
++}
++
++/*****************************************************************************/
++/* 3GPP dialing: +CGACT=1 */
++
++static MMPort *
++dial_3gpp_finish (MMBroadbandBearer  *self,
++                  GAsyncResult       *res,
++                  GError            **error)
++{
++    return MM_PORT (g_task_propagate_pointer (G_TASK (res), error));
++}
++
++static void
++cgact_activate_ready (MMBaseModem  *modem,
++                      GAsyncResult *res,
++                      GTask        *task)
++{
++    ConnectContext *ctx;
++    GError         *error = NULL;
++
++    ctx = g_task_get_task_data (task);
++
++    if (!mm_base_modem_at_command_finish (modem, res, &error))
++        g_task_return_error (task, error);
++    else
++        g_task_return_pointer (task, g_object_ref (ctx->data), g_object_unref);
++    g_object_unref (task);
++}
++
++static void
++dial_3gpp (MMBroadbandBearer   *self,
++           MMBaseModem         *modem,
++           MMPortSerialAt      *primary,
++           guint                cid,
++           GCancellable        *cancellable,
++           GAsyncReadyCallback  callback,
++           gpointer             user_data)
++{
++    MMPort           *data;
++    GTask            *task;
++    g_autofree gchar *cmd = NULL;
++
++    data = mm_base_modem_peek_best_data_port (modem, MM_PORT_TYPE_NET);
++    if (!data) {
++        g_task_report_new_error (self, callback, user_data, dial_3gpp,
++                                 MM_CORE_ERROR, MM_CORE_ERROR_NOT_FOUND,
++                                 "No valid data port found to launch connection");
++        return;
++    }
++
++    task = connect_task_new (MM_BROADBAND_BEARER_SHANNON (self), modem,
++                             data, cid, cancellable, callback, user_data);
++
++    cmd = g_strdup_printf ("+CGACT=1,%u", cid);
++    mm_obj_dbg (self, "activating PDP context #%u...", cid);
++    mm_base_modem_at_command (modem,
++                              cmd,
++                              MM_BASE_BEARER_DEFAULT_CONNECTION_TIMEOUT,
++                              FALSE,
++                              (GAsyncReadyCallback) cgact_activate_ready,
++                              task);
++}
++
++/*****************************************************************************/
++/* 3GPP disconnection: +CGACT=0 */
++
++static gboolean
++disconnect_3gpp_finish (MMBroadbandBearer  *self,
++                        GAsyncResult       *res,
++                        GError            **error)
++{
++    return g_task_propagate_boolean (G_TASK (res), error);
++}
++
++static void
++cgact_deactivate_ready (MMBaseModem  *modem,
++                        GAsyncResult *res,
++                        GTask        *task)
++{
++    MMBroadbandBearerShannon *self;
++    GError                   *error = NULL;
++
++    self = g_task_get_source_object (task);
++
++    if (!mm_base_modem_at_command_finish (modem, res, &error)) {
++        /* The last LTE PDN cannot be released; it is down from the user's
++         * point of view all the same. */
++        mm_obj_dbg (self, "ignored error when disconnecting: %s", error->message);
++        g_clear_error (&error);
++    }
++    g_task_return_boolean (task, TRUE);
++    g_object_unref (task);
++}
++
++static void
++disconnect_3gpp (MMBroadbandBearer   *self,
++                 MMBroadbandModem    *modem,
++                 MMPortSerialAt      *primary,
++                 MMPortSerialAt      *secondary,
++                 MMPort              *data,
++                 guint                cid,
++                 GAsyncReadyCallback  callback,
++                 gpointer             user_data)
++{
++    GTask            *task;
++    g_autofree gchar *cmd = NULL;
++
++    task = connect_task_new (MM_BROADBAND_BEARER_SHANNON (self), MM_BASE_MODEM (modem),
++                             data, cid, NULL, callback, user_data);
++
++    cmd = g_strdup_printf ("+CGACT=0,%u", cid);
++    mm_base_modem_at_command (MM_BASE_MODEM (modem),
++                              cmd,
++                              MM_BASE_BEARER_DEFAULT_DISCONNECTION_TIMEOUT,
++                              FALSE,
++                              (GAsyncReadyCallback) cgact_deactivate_ready,
++                              task);
++}
++
++/*****************************************************************************/
++
++MMBaseBearer *
++mm_broadband_bearer_shannon_new_finish (GAsyncResult  *res,
++                                        GError       **error)
++{
++    GObject *source;
++    GObject *bearer;
++
++    source = g_async_result_get_source_object (res);
++    bearer = g_async_initable_new_finish (G_ASYNC_INITABLE (source), res, error);
++    g_object_unref (source);
++
++    if (!bearer)
++        return NULL;
++
++    /* Only export valid bearers */
++    mm_base_bearer_export (MM_BASE_BEARER (bearer));
++
++    return MM_BASE_BEARER (bearer);
++}
++
++void
++mm_broadband_bearer_shannon_new (MMBroadbandModemShannon *modem,
++                                 MMBearerProperties      *config,
++                                 GCancellable            *cancellable,
++                                 GAsyncReadyCallback      callback,
++                                 gpointer                 user_data)
++{
++    g_async_initable_new_async (
++        MM_TYPE_BROADBAND_BEARER_SHANNON,
++        G_PRIORITY_DEFAULT,
++        cancellable,
++        callback,
++        user_data,
++        MM_BASE_BEARER_MODEM, modem,
++        MM_BIND_TO, modem,
++        MM_BASE_BEARER_CONFIG, config,
++        NULL);
++}
++
++static void
++mm_broadband_bearer_shannon_init (MMBroadbandBearerShannon *self)
++{
++}
++
++static void
++mm_broadband_bearer_shannon_class_init (MMBroadbandBearerShannonClass *klass)
++{
++    MMBroadbandBearerClass *broadband_bearer_class = MM_BROADBAND_BEARER_CLASS (klass);
++
++    broadband_bearer_class->dial_3gpp = dial_3gpp;
++    broadband_bearer_class->dial_3gpp_finish = dial_3gpp_finish;
++    broadband_bearer_class->get_ip_config_3gpp = get_ip_config_3gpp;
++    broadband_bearer_class->get_ip_config_3gpp_finish = get_ip_config_3gpp_finish;
++    broadband_bearer_class->disconnect_3gpp = disconnect_3gpp;
++    broadband_bearer_class->disconnect_3gpp_finish = disconnect_3gpp_finish;
++}
+diff --git a/src/plugins/shannon/mm-broadband-bearer-shannon.h b/src/plugins/shannon/mm-broadband-bearer-shannon.h
+new file mode 100644
+index 0000000..1d94300
+--- /dev/null
++++ b/src/plugins/shannon/mm-broadband-bearer-shannon.h
+@@ -0,0 +1,50 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
++/*
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ */
++
++#ifndef MM_BROADBAND_BEARER_SHANNON_H
++#define MM_BROADBAND_BEARER_SHANNON_H
++
++#include <glib.h>
++#include <glib-object.h>
++
++#define _LIBMM_INSIDE_MM
++#include <libmm-glib.h>
++
++#include "mm-broadband-bearer.h"
++#include "mm-broadband-modem-shannon.h"
++
++#define MM_TYPE_BROADBAND_BEARER_SHANNON            (mm_broadband_bearer_shannon_get_type ())
++#define MM_BROADBAND_BEARER_SHANNON(obj)            (G_TYPE_CHECK_INSTANCE_CAST ((obj), MM_TYPE_BROADBAND_BEARER_SHANNON, MMBroadbandBearerShannon))
++#define MM_BROADBAND_BEARER_SHANNON_CLASS(klass)    (G_TYPE_CHECK_CLASS_CAST ((klass),  MM_TYPE_BROADBAND_BEARER_SHANNON, MMBroadbandBearerShannonClass))
++#define MM_IS_BROADBAND_BEARER_SHANNON(obj)         (G_TYPE_CHECK_INSTANCE_TYPE ((obj), MM_TYPE_BROADBAND_BEARER_SHANNON))
++#define MM_IS_BROADBAND_BEARER_SHANNON_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE ((klass),  MM_TYPE_BROADBAND_BEARER_SHANNON))
++#define MM_BROADBAND_BEARER_SHANNON_GET_CLASS(obj)  (G_TYPE_INSTANCE_GET_CLASS ((obj),  MM_TYPE_BROADBAND_BEARER_SHANNON, MMBroadbandBearerShannonClass))
++
++typedef struct _MMBroadbandBearerShannon MMBroadbandBearerShannon;
++typedef struct _MMBroadbandBearerShannonClass MMBroadbandBearerShannonClass;
++
++struct _MMBroadbandBearerShannon {
++    MMBroadbandBearer parent;
++};
++
++struct _MMBroadbandBearerShannonClass {
++    MMBroadbandBearerClass parent;
++};
++
++GType mm_broadband_bearer_shannon_get_type (void);
++G_DEFINE_AUTOPTR_CLEANUP_FUNC (MMBroadbandBearerShannon, g_object_unref)
++
++void          mm_broadband_bearer_shannon_new        (MMBroadbandModemShannon *modem,
++                                                      MMBearerProperties      *config,
++                                                      GCancellable            *cancellable,
++                                                      GAsyncReadyCallback      callback,
++                                                      gpointer                 user_data);
++MMBaseBearer *mm_broadband_bearer_shannon_new_finish (GAsyncResult            *res,
++                                                      GError                 **error);
++
++#endif /* MM_BROADBAND_BEARER_SHANNON_H */
+diff --git a/src/plugins/shannon/mm-broadband-modem-shannon.c b/src/plugins/shannon/mm-broadband-modem-shannon.c
+new file mode 100644
+index 0000000..0b06009
+--- /dev/null
++++ b/src/plugins/shannon/mm-broadband-modem-shannon.c
+@@ -0,0 +1,111 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
++/*
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ */
++
++#include <config.h>
++
++#include <ModemManager.h>
++#define _LIBMM_INSIDE_MM
++#include <libmm-glib.h>
++
++#include "mm-broadband-bearer-shannon.h"
++#include "mm-broadband-modem-shannon.h"
++#include "mm-iface-modem.h"
++#include "mm-log-object.h"
++
++static void iface_modem_init (MMIfaceModemInterface *iface);
++
++static MMIfaceModemInterface *iface_modem_parent;
++
++G_DEFINE_TYPE_EXTENDED (MMBroadbandModemShannon, mm_broadband_modem_shannon, MM_TYPE_BROADBAND_MODEM, 0,
++                        G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM, iface_modem_init))
++
++/*****************************************************************************/
++/* Create bearer (Modem interface) */
++
++static MMBaseBearer *
++modem_create_bearer_finish (MMIfaceModem  *self,
++                            GAsyncResult  *res,
++                            GError       **error)
++{
++    return g_task_propagate_pointer (G_TASK (res), error);
++}
++
++static void
++bearer_new_ready (GObject      *source,
++                  GAsyncResult *res,
++                  GTask        *task)
++{
++    MMBaseBearer *bearer;
++    GError       *error = NULL;
++
++    bearer = mm_broadband_bearer_shannon_new_finish (res, &error);
++    if (!bearer)
++        g_task_return_error (task, error);
++    else
++        g_task_return_pointer (task, bearer, g_object_unref);
++    g_object_unref (task);
++}
++
++static void
++modem_create_bearer (MMIfaceModem        *self,
++                     MMBearerProperties  *properties,
++                     GAsyncReadyCallback  callback,
++                     gpointer             user_data)
++{
++    GTask *task;
++
++    task = g_task_new (self, NULL, callback, user_data);
++    mm_obj_dbg (self, "creating Shannon bearer...");
++    mm_broadband_bearer_shannon_new (MM_BROADBAND_MODEM_SHANNON (self),
++                                     properties,
++                                     NULL,
++                                     (GAsyncReadyCallback) bearer_new_ready,
++                                     task);
++}
++
++/*****************************************************************************/
++
++MMBroadbandModemShannon *
++mm_broadband_modem_shannon_new (const gchar  *device,
++                                const gchar  *physdev,
++                                const gchar **drivers,
++                                const gchar  *plugin,
++                                guint16       vendor_id,
++                                guint16       product_id)
++{
++    return g_object_new (MM_TYPE_BROADBAND_MODEM_SHANNON,
++                         MM_BASE_MODEM_DEVICE, device,
++                         MM_BASE_MODEM_PHYSDEV, physdev,
++                         MM_BASE_MODEM_DRIVERS, drivers,
++                         MM_BASE_MODEM_PLUGIN, plugin,
++                         MM_BASE_MODEM_VENDOR_ID, vendor_id,
++                         MM_BASE_MODEM_PRODUCT_ID, product_id,
++                         /* Data over rmnet only, never PPP on the AT port */
++                         MM_BASE_MODEM_DATA_NET_SUPPORTED, TRUE,
++                         MM_BASE_MODEM_DATA_TTY_SUPPORTED, FALSE,
++                         NULL);
++}
++
++static void
++mm_broadband_modem_shannon_init (MMBroadbandModemShannon *self)
++{
++}
++
++static void
++iface_modem_init (MMIfaceModemInterface *iface)
++{
++    iface_modem_parent = g_type_interface_peek_parent (iface);
++
++    iface->create_bearer = modem_create_bearer;
++    iface->create_bearer_finish = modem_create_bearer_finish;
++}
++
++static void
++mm_broadband_modem_shannon_class_init (MMBroadbandModemShannonClass *klass)
++{
++}
+diff --git a/src/plugins/shannon/mm-broadband-modem-shannon.h b/src/plugins/shannon/mm-broadband-modem-shannon.h
+new file mode 100644
+index 0000000..0a03eb6
+--- /dev/null
++++ b/src/plugins/shannon/mm-broadband-modem-shannon.h
+@@ -0,0 +1,42 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
++/*
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ */
++
++#ifndef MM_BROADBAND_MODEM_SHANNON_H
++#define MM_BROADBAND_MODEM_SHANNON_H
++
++#include "mm-broadband-modem.h"
++
++#define MM_TYPE_BROADBAND_MODEM_SHANNON            (mm_broadband_modem_shannon_get_type ())
++#define MM_BROADBAND_MODEM_SHANNON(obj)            (G_TYPE_CHECK_INSTANCE_CAST ((obj), MM_TYPE_BROADBAND_MODEM_SHANNON, MMBroadbandModemShannon))
++#define MM_BROADBAND_MODEM_SHANNON_CLASS(klass)    (G_TYPE_CHECK_CLASS_CAST ((klass),  MM_TYPE_BROADBAND_MODEM_SHANNON, MMBroadbandModemShannonClass))
++#define MM_IS_BROADBAND_MODEM_SHANNON(obj)         (G_TYPE_CHECK_INSTANCE_TYPE ((obj), MM_TYPE_BROADBAND_MODEM_SHANNON))
++#define MM_IS_BROADBAND_MODEM_SHANNON_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE ((klass),  MM_TYPE_BROADBAND_MODEM_SHANNON))
++#define MM_BROADBAND_MODEM_SHANNON_GET_CLASS(obj)  (G_TYPE_INSTANCE_GET_CLASS ((obj),  MM_TYPE_BROADBAND_MODEM_SHANNON, MMBroadbandModemShannonClass))
++
++typedef struct _MMBroadbandModemShannon MMBroadbandModemShannon;
++typedef struct _MMBroadbandModemShannonClass MMBroadbandModemShannonClass;
++
++struct _MMBroadbandModemShannon {
++    MMBroadbandModem parent;
++};
++
++struct _MMBroadbandModemShannonClass {
++    MMBroadbandModemClass parent;
++};
++
++GType mm_broadband_modem_shannon_get_type (void);
++G_DEFINE_AUTOPTR_CLEANUP_FUNC (MMBroadbandModemShannon, g_object_unref)
++
++MMBroadbandModemShannon *mm_broadband_modem_shannon_new (const gchar  *device,
++                                                         const gchar  *physdev,
++                                                         const gchar **drivers,
++                                                         const gchar  *plugin,
++                                                         guint16       vendor_id,
++                                                         guint16       product_id);
++
++#endif /* MM_BROADBAND_MODEM_SHANNON_H */
+diff --git a/src/plugins/shannon/mm-plugin-shannon.c b/src/plugins/shannon/mm-plugin-shannon.c
+new file mode 100644
+index 0000000..13eaf24
+--- /dev/null
++++ b/src/plugins/shannon/mm-plugin-shannon.c
+@@ -0,0 +1,76 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
++/*
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * Samsung Shannon CP integrated in Exynos SoCs (e.g. Exynos 8895), driven
++ * by the mainline port of Samsung's modem_v1 driver ("mif_sipc5"): AT
++ * port on the WWAN subsystem, raw-IP rmnet net ports.
++ */
++
++#include <string.h>
++#include <gmodule.h>
++
++#define _LIBMM_INSIDE_MM
++#include <libmm-glib.h>
++
++#include "mm-plugin-common.h"
++#include "mm-broadband-modem-shannon.h"
++#include "mm-log-object.h"
++
++#define MM_TYPE_PLUGIN_SHANNON mm_plugin_shannon_get_type ()
++MM_DEFINE_PLUGIN (SHANNON, shannon, Shannon)
++
++/*****************************************************************************/
++
++static MMBaseModem *
++create_modem (MMPlugin     *self,
++              const gchar  *uid,
++              const gchar  *physdev,
++              const gchar **drivers,
++              guint16       vendor,
++              guint16       product,
++              guint16       subsystem_vendor,
++              guint16       subsystem_device,
++              GList        *probes,
++              GError      **error)
++{
++    return MM_BASE_MODEM (mm_broadband_modem_shannon_new (uid,
++                                                          physdev,
++                                                          drivers,
++                                                          mm_plugin_get_name (self),
++                                                          vendor,
++                                                          product));
++}
++
++/*****************************************************************************/
++
++MM_PLUGIN_NAMED_CREATOR_SCOPE MMPlugin *
++mm_plugin_create_shannon (void)
++{
++    static const gchar *subsystems[] = { "wwan", "net", NULL };
++    static const gchar *drivers[] = { "mif_sipc5", NULL };
++
++    return MM_PLUGIN (
++        g_object_new (MM_TYPE_PLUGIN_SHANNON,
++                      MM_PLUGIN_NAME,               MM_MODULE_NAME,
++                      MM_PLUGIN_ALLOWED_SUBSYSTEMS, subsystems,
++                      MM_PLUGIN_ALLOWED_DRIVERS,    drivers,
++                      MM_PLUGIN_ALLOWED_AT,         TRUE,
++                      NULL));
++}
++
++static void
++mm_plugin_shannon_init (MMPluginShannon *self)
++{
++}
++
++static void
++mm_plugin_shannon_class_init (MMPluginShannonClass *klass)
++{
++    MMPluginClass *plugin_class = MM_PLUGIN_CLASS (klass);
++
++    plugin_class->create_modem = create_modem;
++}
+-- 
+2.43.0
+

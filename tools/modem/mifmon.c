@@ -20,7 +20,10 @@
  *   mifmon -M                  also serve /dev/wwan0at0 for ModemManager
  *                              (via /dev/wwan_at_ctl, kernel wwan_at_bridge):
  *                              AT proxy to umts_router, our own attach
- *                              commands go between ModemManager's
+ *                              commands go between ModemManager's. With -d
+ *                              the data call follows ModemManager's
+ *                              AT+CGACT (shannon plugin) instead of
+ *                              starting by itself; -s is then not needed
  *   mifmon -r [-e efs-dir]     also answer the CP's RFS (file/NV) requests
  *                              (default /var/lib/android-modem/efs)
  *
@@ -56,6 +59,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -659,7 +665,7 @@ static void rfs_rx(const uint8_t *p, size_t n)
 /* --- data call ---------------------------------------------------------- */
 
 enum dc_step { DC_OFF, DC_AT_CGDCONT, DC_AT_CGATT, DC_DEFINE, DC_PS_ATTACH, DC_ACTIVATE,
-	       DC_UP };
+	       DC_UP, DC_ATTACHED };
 
 static struct {
 	enum dc_step step;
@@ -672,6 +678,10 @@ static struct {
 	char at_rx[512];	/* AT reply collected so far */
 	time_t deadline;	/* retry the attach after this */
 	int ipc_attach;		/* -I: attach over IPC, leave the AT port alone */
+	int on_demand;		/* -M with -d: data call only when MM asks */
+	int want;		/* MM asked for the data call (AT+CGACT=1) */
+	int mm_act_waiting;	/* MM's AT+CGACT=1 not answered yet */
+	char ip[16], dns1[16], dns2[16];
 } dc;
 
 static void fmt_send(uint8_t *f, size_t n)
@@ -733,16 +743,30 @@ static void px_idle(void)
 	}
 }
 
+static void px_reply(const char *r)
+{
+	if (px.fd >= 0 && write(px.fd, r, strlen(r)) < 0)
+		perror("mifmon: write wwan_at_ctl");
+}
+
+static void dc_mm_cgact(int on, unsigned int cid);
+static void dc_mm_status(char *out, size_t len);
+static int dc_mm_contrdp(char *out, size_t len);
+
 /*
- * Commands this CP rejects but ModemManager needs to succeed, answered
- * here instead. ATZ (reset to the stored profile) gets +CME ERROR: 100 and
- * is the first command of ModemManager's enable sequence.
+ * Commands answered here instead of by the CP:
+ *  - ATZ (reset to the stored profile): the CP says +CME ERROR: 100, and
+ *    it is the first command of ModemManager's enable sequence.
+ *  - with -M -d, the data call commands of ModemManager's shannon plugin:
+ *    AT+CGACT=1/0,<cid>, AT+CGACT?, AT+CGCONTRDP[=<cid>]. The CP's own
+ *    answers would describe the AT-level context, which is not the one
+ *    routed to rmnet; the IPC data call is.
  */
 static int px_local(const uint8_t *p, size_t n)
 {
-	static const char *const ok_cmds[] = { "ATZ", "ATZ0" };
-	char cmd[16];
+	char cmd[64], out[256];
 	size_t i, len = 0;
+	unsigned int a, b;
 
 	for (i = 0; i < n && len < sizeof(cmd) - 1; i++)
 		if (p[i] != '\r' && p[i] != '\n')
@@ -750,18 +774,25 @@ static int px_local(const uint8_t *p, size_t n)
 	cmd[len] = 0;
 	if (i < n || len == n)
 		return 0;	/* too long, or not a full command line */
-	for (i = 0; i < sizeof(ok_cmds) / sizeof(ok_cmds[0]); i++) {
-		if (!strcmp(cmd, ok_cmds[i])) {
-			static const char ok[] = "\r\nOK\r\n";
 
-			if (write(px.fd, ok, sizeof(ok) - 1) < 0)
-				perror("mifmon: write wwan_at_ctl");
-			stamp();
-			printf("MM %s answered locally\n", cmd);
-			return 1;
-		}
+	if (!strcmp(cmd, "ATZ") || !strcmp(cmd, "ATZ0")) {
+		px_reply("\r\nOK\r\n");
+	} else if (dc.on_demand && sscanf(cmd, "AT+CGACT=%u,%u", &a, &b) == 2 && a <= 1) {
+		dc_mm_cgact(a, b);	/* replies itself, maybe later */
+	} else if (dc.on_demand && !strcmp(cmd, "AT+CGACT?")) {
+		dc_mm_status(out, sizeof(out));
+		px_reply(out);
+	} else if (dc.on_demand && !strncmp(cmd, "AT+CGCONTRDP", 12)) {
+		if (dc_mm_contrdp(out, sizeof(out)))
+			px_reply(out);
+		else
+			px_reply("\r\n+CME ERROR: 3\r\n");
+	} else {
+		return 0;
 	}
-	return 0;
+	stamp();
+	printf("MM %s answered locally\n", cmd);
+	return 1;
 }
 
 /* bytes from ModemManager */
@@ -920,6 +951,14 @@ static void dc_next(void)
 		at_send("AT+CGATT=1");
 		break;
 	case DC_AT_CGATT:	/* define the context over IPC */
+		if (dc.on_demand && !dc.want) {
+			/* ModemManager decides when to bring the call up */
+			dc.step = DC_ATTACHED;
+			dc.deadline = 0;
+			stamp();
+			printf("DATA attached, data call on request\n");
+			break;
+		}
 		dc_send_define();
 		break;
 	case DC_DEFINE:
@@ -971,6 +1010,11 @@ static void dc_at_rx(const uint8_t *p, size_t n)
 /* start over (CP rebooted, or a step got no answer) after delay seconds */
 static void dc_restart(int delay)
 {
+	if (dc.mm_act_waiting) {
+		dc.mm_act_waiting = 0;
+		dc.want = 0;
+		px_reply("\r\n+CME ERROR: 148\r\n");	/* unspecified GPRS error */
+	}
 	px.own_active = 0;
 	px.own_wait = 0;
 	dc.step = DC_OFF;
@@ -1011,6 +1055,74 @@ static void dc_tick(void)
 	}
 }
 
+static void set_mtu(const char *iface, unsigned int mtu)
+{
+	struct ifreq ifr;
+	int sk;
+
+	if (!mtu)
+		return;
+	sk = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sk < 0)
+		return;
+	memset(&ifr, 0, sizeof(ifr));
+	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", iface);
+	ifr.ifr_mtu = mtu;
+	if (ioctl(sk, SIOCSIFMTU, &ifr) < 0)
+		perror("mifmon: SIOCSIFMTU");
+	close(sk);
+}
+
+/* ModemManager's AT+CGACT=<on>,<cid> */
+static void dc_mm_cgact(int on, unsigned int cid)
+{
+	if (cid != dc.cid) {
+		/* only context <cid> is routed to the net port MM uses */
+		px_reply("\r\n+CME ERROR: 4\r\n");
+		return;
+	}
+	if (!on) {
+		/* keep the IPC call (the last LTE PDN cannot go anyway) */
+		dc.want = 0;
+		px_reply("\r\nOK\r\n");
+		return;
+	}
+	dc.want = 1;
+	if (dc.step == DC_UP) {
+		px_reply("\r\nOK\r\n");
+		return;
+	}
+	dc.mm_act_waiting = 1;	/* OK once the CP reports the IP */
+	if (dc.step == DC_ATTACHED)
+		dc_send_define();
+	/* otherwise the attach sequence runs on into the data call */
+}
+
+/* ModemManager's AT+CGACT? */
+static void dc_mm_status(char *out, size_t len)
+{
+	snprintf(out, len, "\r\n+CGACT: %u,%d\r\n\r\nOK\r\n", dc.cid,
+		 dc.want && dc.step == DC_UP);
+}
+
+/*
+ * ModemManager's AT+CGCONTRDP: the IPC call's address as a /31 with the
+ * other address of the pair as gateway (rmnet is raw IP: the gateway is
+ * only there to make a default route).
+ */
+static int dc_mm_contrdp(char *out, size_t len)
+{
+	unsigned int a, b, c, d;
+
+	if (dc.step != DC_UP || !dc.want ||
+	    sscanf(dc.ip, "%u.%u.%u.%u", &a, &b, &c, &d) != 4)
+		return 0;
+	snprintf(out, len,
+		 "\r\n+CGCONTRDP: %u,5,\"\",\"%s.255.255.255.254\",\"%u.%u.%u.%u\",\"%s\",\"%s\"\r\n\r\nOK\r\n",
+		 dc.cid, dc.ip, a, b, c, d ^ 1, dc.dns1, dc.dns2);
+	return 1;
+}
+
 static void dc_ip_config(const uint8_t *p, size_t n)
 {
 	char ip[16], dns1[16], dns2[16], iface[16], num[8];
@@ -1030,6 +1142,14 @@ static void dc_ip_config(const uint8_t *p, size_t n)
 	       dc.cid, iface, ip, dns1, dns2, mtu);
 	dc.step = DC_UP;
 	dc.deadline = 0;
+	snprintf(dc.ip, sizeof(dc.ip), "%s", ip);
+	snprintf(dc.dns1, sizeof(dc.dns1), "%s", dns1);
+	snprintf(dc.dns2, sizeof(dc.dns2), "%s", dns2);
+	set_mtu(iface, mtu);
+	if (dc.mm_act_waiting) {
+		dc.mm_act_waiting = 0;
+		px_reply("\r\nOK\r\n");
+	}
 	if (!dc.hook)
 		return;
 
@@ -1058,6 +1178,8 @@ static void dc_rx(const uint8_t *p, size_t n)
 		/* PWR_PHONE_PWR_UP: the CP (re)booted, its contexts are gone */
 		stamp();
 		printf("DATA CP powered up, setting up the data call again\n");
+		if (dc.on_demand)
+			dc.want = 0;	/* MM sees the call gone and reconnects */
 		dc_restart(5);
 		return;
 	}
@@ -1089,6 +1211,8 @@ static void dc_rx(const uint8_t *p, size_t n)
 		       p[8] == 1 ? " (active)" : "");
 		if (p[8] != 1 && dc.step == DC_UP) {
 			printf("DATA call dropped, setting it up again in 10 s\n");
+			if (dc.on_demand)
+				dc.want = 0;
 			dc_restart(10);
 		}
 	}
@@ -1156,6 +1280,8 @@ int main(int argc, char **argv)
 	dc.fd = pfd[0].fd;
 	dc.at_fd = pfd[2].fd;
 	rfs.fd = pfd[1].fd;
+	/* with ModemManager, it decides when the data call is up */
+	dc.on_demand = proxy && data && !dc.ipc_attach && px.fd >= 0;
 	if (data && !dc.ipc_attach && dc.at_fd < 0) {
 		fprintf(stderr, "mifmon: -d needs /dev/umts_router\n");
 		return 1;

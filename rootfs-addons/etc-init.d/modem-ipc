@@ -11,7 +11,9 @@
 # the APN (default: network-provided). MIFMON_ATTACH=ipc attaches over Samsung
 # IPC instead of AT and leaves the AT port alone (experimental: does not attach).
 # MIFMON_MM=yes serves /dev/wwan0at0 (kernel wwan_at_bridge) for
-# ModemManager: mifmon proxies its AT commands to umts_router.
+# ModemManager: mifmon proxies its AT commands to umts_router. Together with
+# MIFMON_DATA=yes the data call is then brought up when ModemManager asks
+# (shannon plugin, tools/mm-plugin-shannon) and configured by NetworkManager.
 
 description="Shannon CP IPC monitor (mifmon)"
 
@@ -26,7 +28,11 @@ if [ "${MIFMON_DATA:-no}" = yes ]; then
 	else
 		command_args="$command_args -d"
 	fi
-	command_args="$command_args -s /usr/local/bin/rmnet-up -A '${MIFMON_APN:-}'"
+	command_args="$command_args -A '${MIFMON_APN:-}'"
+	# with ModemManager (shannon plugin) NetworkManager configures rmnet0
+	if [ "${MIFMON_MM:-no}" != yes ]; then
+		command_args="$command_args -s /usr/local/bin/rmnet-up"
+	fi
 fi
 supervisor=supervise-daemon
 output_log=/var/log/mifmon.log

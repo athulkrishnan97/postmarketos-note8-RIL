@@ -773,3 +773,32 @@ creates it from a late_initcall.
   modemmanager.
 - Lesson: `rc-service modemmanager stop` does not stop a D-Bus-activated ModemManager; an MM
   that outlives a mifmon restart waits forever on a lost reply - restart MM after mifmon.
+
+## 2026-10-10 ~15:55 DATA THROUGH MODEMMANAGER: WRITTEN, NOT YET ON THE PHONE
+(Laptop cloudflared tunnel went down ~13:30: Cloudflare 530 / "websocket: bad handshake";
+the work below was done offline.)
+- The generic MM plugin always dials ATD*99***cid# (PPP on the AT port); it never uses a
+  net port. No existing plugin can be forced on a platform device (vendor id only from
+  USB/PCI sysfs attributes; no udev override), so: new MM plugin "shannon"
+  (tools/mm-plugin-shannon/0001-*.patch on MM tag 1.25.95-dev), matched by driver
+  mif_sipc5, subsystems wwan+net. Bearer: dial = +CGACT=1,cid on the net port, IP =
+  +CGCONTRDP=cid -> static (address, prefix, gateway, DNS), disconnect = +CGACT=0,cid
+  (errors ignored, last PDN). Modem: DATA_NET only, no PPP.
+- Compiled warning-free in the cloud against 1.25.95-dev (x86, MM's own -W set).
+  WITH_SUSPEND_RESUME changes MMBaseBearerClass/MMBroadbandModemClass layouts and the phone's
+  MM has it, so the .so must be built with -Dsystemd_suspend_resume=true:
+  tools/mm-plugin-shannon/build-on-device.sh builds it on the phone (musl, same headers).
+- mifmon -M -d = on-demand data call: attach as before, then wait (DC_ATTACHED); MM's
+  AT+CGACT=1,1 runs the IPC define/activate and is answered OK when the IP config arrives;
+  AT+CGACT? / AT+CGCONTRDP[=1] answered from the IPC state (address as /31, gateway = the
+  other address of the pair, IPC DNS); AT+CGACT=0 -> OK (IPC call kept); cid != 1 ->
+  +CME ERROR: 4 (only context 1 is routed to rmnet0). MTU from the IPC config set by
+  ioctl. On CP power-up / call drop, want=0 so MM notices and reconnects. Unit-tested
+  offline: replies fed to MM's mm_3gpp_parse_cgcontrdp_response -> /31, gw, both DNS.
+- udev 78-greatlte-mm.rules: ID_MM_PHYSDEV_UID=shannon-cp on wwan0at0 and rmnet0 (rmnet0 has
+  no parent device), rmnet1-7 ignored. modem-ipc: with MIFMON_MM=yes no rmnet-up hook.
+- To test when the phone is reachable: install 78-greatlte-mm.rules, run
+  build-on-device.sh, new mifmon, MIFMON_DATA=yes MIFMON_MM=yes, restart modem-ipc then
+  ModemManager; expect plugin "shannon", ports wwan0at0 (at) + rmnet0 (net);
+  `mmcli -m any --simple-connect=apn=` -> bearer connected, static IP on rmnet0;
+  then NetworkManager's mobile connection / the UI toggle.

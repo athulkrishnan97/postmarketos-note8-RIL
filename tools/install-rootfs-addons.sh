@@ -87,5 +87,7 @@ install -D -m 755 "$ADDONS/../tools/modem/android-env.sh" "$MNT/usr/local/bin/an
 install -D -m 755 "$ADDONS/../tools/modem/rmnet-up.sh" "$MNT/usr/local/bin/rmnet-up"
 install -D -m 644 "$ADDONS/etc-udev-rules.d/61-greatlte-modem.rules" \
 	"$MNT/etc/udev/rules.d/61-greatlte-modem.rules"
+install -D -m 644 "$ADDONS/etc-udev-rules.d/78-greatlte-mm.rules" \
+	"$MNT/etc/udev/rules.d/78-greatlte-mm.rules"
 
 echo "addons installed into $IMG"
