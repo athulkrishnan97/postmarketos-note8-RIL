@@ -802,3 +802,32 @@ the work below was done offline.)
   ModemManager; expect plugin "shannon", ports wwan0at0 (at) + rmnet0 (net);
   `mmcli -m any --simple-connect=apn=` -> bearer connected, static IP on rmnet0;
   then NetworkManager's mobile connection / the UI toggle.
+
+## 2026-10-11 ~23:15 MOBILE DATA THROUGH MODEMMANAGER + NETWORKMANAGER WORKS
+(Tunnel back as access.oakdalehome.uk.)
+- Phone MM = Alpine modemmanager-1.25.95_git20260709 = commit d776ea38 (aports 04eedda7),
+  built with -Dsystemd_suspend_resume=true, polkit permissive, qmi/mbim/qrtr. The plugin
+  patch applies unchanged; build-on-device.sh now fetches that exact commit (MM_COMMIT) and
+  needs polkit-dev. Plugin built on the phone: /usr/lib/ModemManager/libmm-plugin-shannon.so.
+- Fixes found on the device:
+  - MM filtered rmnet0 as "virtual device" (no parent) -> "Failed to find a data port".
+    ID_MM_DEVICE_PROCESS=1 on rmnet0 (explicit allowlist is checked before the virtual
+    rule) in 78-greatlte-mm.rules.
+  - MM's default connect uses ip-type IP; context 1 is IPV4V6, so MM created context 2 and
+    sent AT+CGACT=1,2 (mifmon said +CME ERROR: 4). mifmon now maps any MM context onto the
+    IPC call of context 1 (rmnet0) and echoes MM's number in +CGACT?/+CGCONTRDP.
+- Result: `mmcli --simple-connect=apn=` -> bearer connected, interface rmnet0, static
+  /31 + gateway + carrier DNS. NetworkManager gsm connection "Mobile data" (apn "",
+  route metric 700, ipv6 off, autoconnect): rmnet0 configured, DNS in resolv.conf; with
+  Wi-Fi off, HTTP by hostname over LTE works (loc=IE). After a reboot: connected <1 min
+  after boot without intervention.
+- Incident: the phone reset once (22:50), seconds after the plugin build finished and
+  files were installed; every file written in that minute came back 0 bytes (no sync).
+  pstore record undecodable (.enc.z). Not reproduced through several later CP restarts and
+  udev triggers; kmsg showed "Could not lock PLL fout_cpucl0/1_pll" under load (cpufreq) -
+  suspect the CPU clock path under heavy load rather than the modem. Always `sync` after
+  installing on this phone.
+- Debugging MM: it is D-Bus-activated (Exec=/usr/sbin/ModemManager) whenever something asks,
+  so `rc-service modemmanager` loses the bus name; for debug logs temporarily add
+  `--log-level=DEBUG --log-file=/var/log/mm.log` to the Exec line of
+  /usr/share/dbus-1/system-services/org.freedesktop.ModemManager1.service.

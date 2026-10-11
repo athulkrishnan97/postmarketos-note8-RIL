@@ -197,6 +197,19 @@ sudo rc-service modemmanager restart   # MM must start after mifmon serves the p
 mmcli -L; sudo mmcli -m any -e; mmcli -m any
 ```
 
-Expected: generic plugin, port `wwan0at0 (at)`, then registered / lte /
-attached. Mobile data stays with mifmon (rmnet0); ModemManager has no net
-port, so do not activate a mobile connection from NetworkManager yet.
+Expected: plugin `shannon` (see below; `generic` without it), ports
+`rmnet0 (net), wwan0at0 (at)`, then registered / lte / attached.
+
+### Mobile data through ModemManager and NetworkManager
+
+```sh
+sudo tools/mm-plugin-shannon/build-on-device.sh   # ModemManager plugin (on the phone)
+# 78-greatlte-mm.rules installed (groups wwan0at0 + rmnet0, allows virtual rmnet0)
+printf 'MIFMON_DATA=yes\nMIFMON_MM=yes\n' | sudo tee /etc/conf.d/modem-ipc
+sudo nmcli c add type gsm ifname '*' con-name 'Mobile data' gsm.apn '' \
+     ipv4.route-metric 700 ipv6.method disabled
+```
+
+With MIFMON_MM=yes mifmon brings the data call up only when ModemManager asks
+(AT+CGACT) and NetworkManager configures rmnet0 (static IP, route, DNS); the
+phone UI's mobile data switch drives it.

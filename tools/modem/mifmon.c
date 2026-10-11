@@ -681,6 +681,7 @@ static struct {
 	int on_demand;		/* -M with -d: data call only when MM asks */
 	int want;		/* MM asked for the data call (AT+CGACT=1) */
 	int mm_act_waiting;	/* MM's AT+CGACT=1 not answered yet */
+	unsigned int mm_cid;	/* context number MM uses (mapped onto cid) */
 	char ip[16], dns1[16], dns2[16];
 } dc;
 
@@ -760,7 +761,8 @@ static int dc_mm_contrdp(char *out, size_t len);
  *  - with -M -d, the data call commands of ModemManager's shannon plugin:
  *    AT+CGACT=1/0,<cid>, AT+CGACT?, AT+CGCONTRDP[=<cid>]. The CP's own
  *    answers would describe the AT-level context, which is not the one
- *    routed to rmnet; the IPC data call is.
+ *    routed to rmnet; the IPC data call is. Any <cid> maps onto the IPC
+ *    call of context -c (rmnet0).
  */
 static int px_local(const uint8_t *p, size_t n)
 {
@@ -1073,20 +1075,22 @@ static void set_mtu(const char *iface, unsigned int mtu)
 	close(sk);
 }
 
-/* ModemManager's AT+CGACT=<on>,<cid> */
+/*
+ * ModemManager's AT+CGACT=<on>,<cid>. Only context <dc.cid> is routed to
+ * the net port ModemManager uses, so whatever context ModemManager picked
+ * (it creates a new one when the IP type differs, e.g. "IP" vs the
+ * attach context's "IPV4V6") is served by the IPC call on <dc.cid>.
+ */
 static void dc_mm_cgact(int on, unsigned int cid)
 {
-	if (cid != dc.cid) {
-		/* only context <cid> is routed to the net port MM uses */
-		px_reply("\r\n+CME ERROR: 4\r\n");
-		return;
-	}
 	if (!on) {
 		/* keep the IPC call (the last LTE PDN cannot go anyway) */
-		dc.want = 0;
+		if (cid == dc.mm_cid)
+			dc.want = 0;
 		px_reply("\r\nOK\r\n");
 		return;
 	}
+	dc.mm_cid = cid;
 	dc.want = 1;
 	if (dc.step == DC_UP) {
 		px_reply("\r\nOK\r\n");
@@ -1101,8 +1105,8 @@ static void dc_mm_cgact(int on, unsigned int cid)
 /* ModemManager's AT+CGACT? */
 static void dc_mm_status(char *out, size_t len)
 {
-	snprintf(out, len, "\r\n+CGACT: %u,%d\r\n\r\nOK\r\n", dc.cid,
-		 dc.want && dc.step == DC_UP);
+	snprintf(out, len, "\r\n+CGACT: %u,%d\r\n\r\nOK\r\n",
+		 dc.mm_cid ? dc.mm_cid : dc.cid, dc.want && dc.step == DC_UP);
 }
 
 /*
@@ -1119,7 +1123,7 @@ static int dc_mm_contrdp(char *out, size_t len)
 		return 0;
 	snprintf(out, len,
 		 "\r\n+CGCONTRDP: %u,5,\"\",\"%s.255.255.255.254\",\"%u.%u.%u.%u\",\"%s\",\"%s\"\r\n\r\nOK\r\n",
-		 dc.cid, dc.ip, a, b, c, d ^ 1, dc.dns1, dc.dns2);
+		 dc.mm_cid ? dc.mm_cid : dc.cid, dc.ip, a, b, c, d ^ 1, dc.dns1, dc.dns2);
 	return 1;
 }
 

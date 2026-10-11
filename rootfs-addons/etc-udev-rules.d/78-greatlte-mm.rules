@@ -1,6 +1,8 @@
 # Shannon modem and ModemManager: the AT port (WWAN, under the modem's
-# platform device) and rmnet0 (virtual netdev, no parent) belong to one
-# modem; rmnet1-7 are other PDP contexts ModemManager does not use.
+# platform device) and rmnet0 belong to one modem. rmnet0 is a virtual
+# netdev (no parent device), which ModemManager filters out unless it is
+# explicitly allowed. rmnet1-7 are other PDP contexts ModemManager does not
+# use.
 SUBSYSTEM=="wwan", KERNEL=="wwan0at0", ENV{ID_MM_PHYSDEV_UID}="shannon-cp"
-SUBSYSTEM=="net", KERNEL=="rmnet0", ENV{ID_MM_PHYSDEV_UID}="shannon-cp", ENV{ID_MM_CANDIDATE}="1"
+SUBSYSTEM=="net", KERNEL=="rmnet0", ENV{ID_MM_PHYSDEV_UID}="shannon-cp", ENV{ID_MM_CANDIDATE}="1", ENV{ID_MM_DEVICE_PROCESS}="1"
 SUBSYSTEM=="net", KERNEL=="rmnet[1-7]", ENV{ID_MM_PORT_IGNORE}="1"
