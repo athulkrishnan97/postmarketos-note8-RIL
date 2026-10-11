@@ -17,4 +17,11 @@ while [ $(cut -d. -f1 /proc/uptime) -lt 90 ]; do sleep 5; done
 for p in /sys/devices/system/cpu/cpu0/cpufreq /sys/devices/system/cpu/cpu4/cpufreq; do
 	[ -d "$p" ] && echo schedutil > "$p/scaling_governor" 2>/dev/null
 done
+# The driver reports a 36 us transition latency, so schedutil defaults to a
+# ~54 us rate limit and retunes the little cluster ~300 times a second; each
+# change relocks a CPU PLL (sometimes failing: "Could not lock PLL"), which
+# made the UI very laggy. 20 ms keeps it responsive at ~1/7 of the changes.
+sleep 1
+[ -w /sys/devices/system/cpu/cpufreq/schedutil/rate_limit_us ] &&
+	echo 20000 > /sys/devices/system/cpu/cpufreq/schedutil/rate_limit_us
 echo "cpuspeed: governors set" > /dev/kmsg 2>/dev/null
