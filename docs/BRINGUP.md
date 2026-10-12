@@ -1092,3 +1092,84 @@ Detour worth recording: before finding the pins, a battery-current comparison
 (amp off / silence / full-scale tone, ~1 A charge current as baseline) showed
 the amp's output stage never drew power - an objective "is the amp running"
 test that needs no ears.
+
+## Hardware video codec: MFC v11 (kernel 7.0-r15)
+
+The Exynos 8895 Multi Format Codec runs under mainline's `s5p-mfc` V4L2
+mem2mem driver (`exynos8895-mfc.patch`, module `s5p_mfc`). It exposes H.264,
+HEVC, VP8, VP9, MPEG-2/4, VC-1 and H.263 decoders and H.264/HEVC/VP8/MPEG-4
+encoders; **H.264 decoding is verified**. HEVC decodes headers but every frame
+comes back flagged as a decode error, VP9 returns nothing (firmware error 0x22,
+NO_KEY_FRAME), and the encoders are untested.
+
+    s5p-mfc 13ce0000.codec: firmware 191118, hardware version 0x1100
+
+1080p H.264 (8 Mb/s, 600 frames) decodes at ~280 fps through ffmpeg
+`h264_v4l2m2m` with ~1 s of CPU (software ffmpeg: ~15 s of CPU over all
+cores); 720p output is bit-identical to ffmpeg's software decoder.
+
+Firmware: the stock `/vendor/firmware/mfc_fw.bin` (656820 bytes, a raw ARM
+image) installed as `/lib/firmware/s5p-mfc-v11.fw`. It is Samsung's and is not
+in this repository; take it from the phone's stock firmware (vendor/system
+image). The vendor driver boots it without the secure world (SMC is DRM-only).
+
+What the port is made of:
+
+- **Codec.** The 8895 MFC is v11 (`ip_ver` 15 -> 0x1100). Its register map,
+  host commands and codec IDs are mainline's v10; context sizes and the H.264
+  MV padding (1024) are v12's. New variant `samsung,exynos8895-mfc`, version
+  0xB0 (0x1100 would trip mainline's v12 checks), firmware `s5p-mfc-v11.fw`,
+  clock "mfc". Decoder options as the vendor driver: parallel processing off,
+  conceal colour, realloc, special parsing, SEI recovery parsing
+  (`v11_dec_opts`/`v11_sei` module parameters), per-frame DEC_TIMEOUT, CPB size
+  = real buffer size. The firmware is reloaded on every boot of the codec (it
+  modifies its own image while running, as on v12).
+- **Firmware below every buffer.** The firmware rejects the stream header
+  (SEQ_HEADER -> error 0x37, ~50 us after the command) when the stream buffer
+  is below its base. The vendor kernel's IOVA allocator is bottom-up, so the
+  firmware (allocated first) is always lowest; the mainline IOMMU DMA
+  allocator is top-down and put every buffer below the firmware. Fix: the
+  32 MiB firmware/context pool is allocated with a 28-bit mask (lands at
+  0x0e000000), later allocations use a 30-bit mask, and the board dts reserves
+  IOVA 0x1000..0x0e000000 for the codec (`memory-region` -> reserved-memory
+  node with `iommu-addresses = <&mfc 0x1000 0xdfff000>`; the cells are those
+  of the codec's bus, not of reserved-memory) so the allocator restarts above
+  the pool. Buffers then land at 0x3fxxxxxx and the header parses.
+- **CMU_MFC** (0x13c00000) as a runtime-PM clock controller inside the MFC
+  power domain (register save/restore), with gates for the codec and both
+  SysMMUs. Two power-domain handshake requirements, both found by writing the
+  PMU from userspace with nothing touching the block:
+  - the TOP `gout_cmu_mfc_bus` gate must stay on (CLK_IS_CRITICAL): CMU_MFC
+    gates it when it runtime-suspends, which is before genpd turns the domain
+    off, and the power-down then sticks half way (status 0x0010000c, not even
+    a power-on request recovers it; the next access to the block hangs the
+    bus);
+  - the block's gates are opened when CMU_MFC suspends (`suspend_regs`), as
+    for Exynos 5433; with the codec gate closed the power-down is refused.
+- **Power domain** `samsung,exynos8895-pd` (PMU 0x16484160, 0xF = on): longer
+  timeout, and a power-off that times out is cancelled (domain switched back
+  on) instead of being left in transition while genpd still counts it as on.
+- **SysMMUs** (0x13c80000, 0x13ca0000) report version 7.0 and are driven as v5
+  (`samsung,exynos8895-sysmmu`); the vendor kernel programs them through the v5
+  translation registers too.
+- **Firmware stays resident.** Once the firmware has run, the domain refuses
+  to power down (status 0x0009000f, with or without the RISC stopped), and
+  resetting a running codec without the vendor's power cycle raced into bus
+  hangs. So on v11 the codec is booted on the first open and then kept
+  powered with the firmware running (core clock gated between commands);
+  only unloading the module powers it off. Before the first open the domain
+  does power off and on cleanly. The vendor teardown order matters if the
+  codec is ever stopped: write `MFC_OFF` (0x7120) = 1 with the RISC running -
+  clearing RISC_ON first makes that write hang the bus.
+
+Using it: `/dev/video0` (decoder) and `/dev/video1` (encoder), group video.
+GStreamer `v4l2h264dec`, `v4l2h265dec`, `v4l2vp9dec`, ... and ffmpeg
+`*_v4l2m2m`. GStreamer copies every decoded frame into system memory when the
+consumer does not take DMA-BUFs (the driver lends it only the DPB minimum),
+and the MFC buffers are uncached, so a `fakesink` pipeline is CPU-bound
+(~22 fps at 1080p) while the decoder itself is not; players that import the
+DMA-BUFs (GPU/KMS) avoid that. `tools/mfc/mfctest.sh` has the checks used
+here.
+
+Boot images: v194 (MFC nodes + IOVA reservation merged into the v186 dtb with
+`tools/mfc/mfc_dtb_merge.py` and `mfc_iova_dt.py`).

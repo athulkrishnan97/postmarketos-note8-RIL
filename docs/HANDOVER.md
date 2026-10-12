@@ -831,3 +831,26 @@ the work below was done offline.)
   so `rc-service modemmanager` loses the bus name; for debug logs temporarily add
   `--log-level=DEBUG --log-file=/var/log/mm.log` to the Exec line of
   /usr/share/dbus-1/system-services/org.freedesktop.ModemManager1.service.
+
+## 2026-10-12 ~10:20 HARDWARE VIDEO DECODER (MFC v11) WORKS
+- Kernel: `exynos8895-mfc.patch` (linux 7.0-r15; CONFIG_VIDEO_SAMSUNG_S5P_MFC=m). Details,
+  findings and why each piece exists: BRINGUP.md "Hardware video codec: MFC v11".
+- Phone: boot-v194-mfc.img (Image from the laptop tree before two cosmetic-only edits:
+  a comment and the SysMMU "raw version" line demoted to dev_dbg; dtb = v186 dtb +
+  tools/mfc/mfc_dtb_merge.py + mfc_iova_dt.py). Module /lib/modules/7.0.0/.../s5p-mfc.ko.zst
+  is the final patch build. Firmware /lib/firmware/s5p-mfc-v11.fw = stock mfc_fw.bin.
+  s5p_mfc autoloads; udev's v4l_id boots the firmware at ~5.5 s.
+- Verified on a normal boot as the user: 1080p H.264 at ~280 fps via
+  `ffmpeg -c:v h264_v4l2m2m`, 720p GStreamer decode bit-identical to software.
+- Bring-up cost several freezes, all from the MFC power domain: power-down needs the TOP
+  MFC bus clock and the block gates running (else it sticks half off and the next access
+  hangs the bus), and after the firmware has run it refuses to power down at all. Now the
+  domain powers off only before first use; after that the firmware stays resident.
+  Debug method that worked: a step-trace with msleep between stages + `dmesg -w` streamed
+  to the laptop (pstore keeps nothing after a forced reboot); PMU writes via devmem to
+  test the domain alone. NEVER read /sys/kernel/debug/clk/clk_summary while the domain
+  may be half off: it runtime-resumes CMU_MFC and hangs.
+- Open: domain power-down after use (vendor sequence not found; costs idle leakage while
+  the module is loaded); GStreamer copies frames out of uncached buffers (zero-copy needs
+  a DMA-BUF consumer); HEVC: every frame flagged as a decode error (headers parse);
+  VP9: no output, firmware error 0x22 (NO_KEY_FRAME); encoders untested.
