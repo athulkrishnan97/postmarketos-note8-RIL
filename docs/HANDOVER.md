@@ -883,3 +883,17 @@ the work below was done offline.)
 - Phone: boot-v196-mfc.img + final module; s5p_mfc autoloads. Bring-up blacklists removed.
 - Note for future debugging: `pkill -f` with a pattern that also appears in the same
   ssh command line kills that command; kill the dmesg streamer separately.
+
+## 2026-10-12 ~13:30 YOUTUBE ON THE MFC; APPS; FIREFOX CAN'T USE IT
+- Firefox: no HW decode. Probe needs NV12/YV12 capture (MFC: NM12/NM21) and ffmpeg
+  v4l2m2m with DRM_PRIME output (not in upstream ffmpeg). Details in BRINGUP.md.
+- YouTube 1080p60 H.264 failed with MFC error 0x41: GStreamer gets s5p-mfc's default
+  256 KiB stream buffer, too small for a 1080p60 key frame. v11 now always uses the 3 MiB
+  CPB (patch updated, module rebuilt and reloaded live). 1080p60 H.264 and VP9 stream in
+  real time on the MFC (10-18% of a core incl. HTTPS).
+- Installed: clapper, clapper-enhancers, libpeas2-python3 (yt-dlp plugin is Python),
+  pipeline (binary: tubefeeder), yt-dlp. Clapper crashed in libsoup (souphttpsrc);
+  ~/.config/plasma-workspace/env/gst-http.sh makes curlhttpsrc preferred (next login).
+- App playback not yet seen on screen: the phone was locked (kscreenlocker_greet), and
+  Clapper's GTK sink waits for its window to render. Retest unlocked.
+- Unrelated: a panfrost WARN (panfrost_gem.c:213, dmabuf import from a QtWebEngine app).

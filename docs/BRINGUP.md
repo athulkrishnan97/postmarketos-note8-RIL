@@ -1196,6 +1196,26 @@ frame out of the uncached buffers (~22 fps at 1080p, one core busy). Use
 `fakevideosink` for benchmarks. `tools/mfc/mfctest.sh` has the checks used
 here.
 
+YouTube (2026-10-12): yt-dlp-resolved 1080p60 streams play in real time on
+the MFC through GStreamer `playbin3` - H.264 (avc1, High@4.2) ~18% of one core,
+VP9 ~10%, including HTTPS download; YouTube's VP9 1080p60 decodes bit-identical
+to software. Needed the v11 stream buffer at the full CPB size: s5p-mfc's
+default (`DEF_CPB_SIZE`, 256 KiB, what GStreamer gets) cannot hold a 1080p60
+key frame, and a picture that fills the buffer fails with firmware error 0x41.
+AV1 is offered by YouTube but not decodable by this MFC.
+
+Apps: Clapper (+ `clapper-enhancers`, `libpeas2-python3` for its yt-dlp
+plugin) and Pipeline (YouTube subscriptions, plays through libclapper) use
+this path. souphttpsrc trips a libsoup thread assertion inside Clapper, so the
+user session prefers curlhttpsrc
+(`~/.config/plasma-workspace/env/gst-http.sh`:
+`GST_PLUGIN_FEATURE_RANK=curlhttpsrc:MAX,souphttpsrc:NONE`).
+
+Firefox (154) does not use the MFC: its V4L2 probe (widget/gtk/GfxInfo.cpp)
+requires single-planar NV12/YV12 capture (the MFC offers NM12/NM21), and its
+V4L2 decoder needs ffmpeg's v4l2m2m wrapper to output DRM_PRIME, which upstream
+ffmpeg (Alpine) does not do (Raspberry Pi's fork does).
+
 Boot images: v196 (Image from the patch as committed; MFC nodes + IOVA
 reservation merged into the v186 dtb with `tools/mfc/mfc_dtb_merge.py` and
 `mfc_iova_dt.py`).

@@ -1,3 +1,4 @@
+19:for f in s5p_mfc.c s5p_mfc_common.h s5p_mfc_ctrl.c s5p_mfc_ctrl.h s5p_mfc_dec.c s5p_mfc_opr_v6.c s5p_mfc_pm.c; do
 diff -Naur a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
 --- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
 +++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
@@ -700,6 +701,25 @@ diff -Naur a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_ctrl.c b/drivers/med
  	s5p_mfc_hw_call(dev->mfc_ops, release_dev_context_buffer, dev);
  
  	s5p_mfc_clock_off(dev);
+diff -Naur a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_dec.c b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_dec.c
+--- a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_dec.c
++++ b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_dec.c
+@@ -476,6 +476,15 @@
+ 			ctx->dec_src_buf_size = buf_size->cpb;
+ 		else
+ 			ctx->dec_src_buf_size = pix_mp->plane_fmt[0].sizeimage;
++		/*
++		 * v11: a picture must fit in one stream buffer with room to
++		 * spare (else the firmware fails with error 0x41); 256 KiB is
++		 * too small for 1080p60 key frames, so use the full CPB size.
++		 */
++		if (IS_MFCV11(dev)) {
++			ctx->dec_src_buf_size = buf_size->cpb;
++			pix_mp->plane_fmt[0].sizeimage = buf_size->cpb;
++		}
+ 		pix_mp->plane_fmt[0].bytesperline = 0;
+ 		ctx->state = MFCINST_INIT;
+ 		ret = 0;
 diff -Naur a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_opr_v6.c b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_opr_v6.c
 --- a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_opr_v6.c
 +++ b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_opr_v6.c
