@@ -1204,12 +1204,22 @@ default (`DEF_CPB_SIZE`, 256 KiB, what GStreamer gets) cannot hold a 1080p60
 key frame, and a picture that fills the buffer fails with firmware error 0x41.
 AV1 is offered by YouTube but not decodable by this MFC.
 
-Apps: Clapper (+ `clapper-enhancers`, `libpeas2-python3` for its yt-dlp
-plugin) and Pipeline (YouTube subscriptions, plays through libclapper) use
-this path. souphttpsrc trips a libsoup thread assertion inside Clapper, so the
-user session prefers curlhttpsrc
-(`~/.config/plasma-workspace/env/gst-http.sh`:
-`GST_PLUGIN_FEATURE_RANK=curlhttpsrc:MAX,souphttpsrc:NONE`).
+Apps: Clapper (`clapper-enhancers` yt-dlp plugin) plays YouTube on the MFC
+(`v4l2h264dec`; YouTube's DASH adapts 240p..720p60 on this Wi-Fi, ~35% of one
+core including download, audio and rendering; 3-minute soak clean). Pipeline
+(YouTube subscriptions) plays through the same libclapper. Setup and the
+Alpine workarounds it needs: `tools/mfc/setup-youtube-apps.sh` (missing
+libgstclapper.so link for Clapper's GL importers, libpeas Python loader for
+the yt-dlp plugin, curl instead of souphttpsrc, and no media-scanner enhancer:
+a second adaptivedemux2 libsoup session in the process trips libsoup's thread
+assertion). The yt-dlp plugin prefers H.264, then AV1 (software here).
+
+Driver fixes found through GStreamer renegotiation (adaptive streams reopen the
+decoder on the same file at each resolution step): REQBUFS(0) on CAPTURE now
+resets the capture queue state (mainline left it "mapped", so the reopened
+instance ran INIT_BUFFERS without codec memory: "Not enough memory has been
+allocated", then refused the new REQBUFS), and TRY_FMT reports
+V4L2_FIELD_NONE (GStreamer flags FIELD_ANY as a driver bug).
 
 Firefox (154) does not use the MFC: its V4L2 probe (widget/gtk/GfxInfo.cpp)
 requires single-planar NV12/YV12 capture (the MFC offers NM12/NM21), and its

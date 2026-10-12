@@ -1,4 +1,3 @@
-19:for f in s5p_mfc.c s5p_mfc_common.h s5p_mfc_ctrl.c s5p_mfc_ctrl.h s5p_mfc_dec.c s5p_mfc_opr_v6.c s5p_mfc_pm.c; do
 diff -Naur a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
 --- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
 +++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
@@ -704,7 +703,16 @@ diff -Naur a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_ctrl.c b/drivers/med
 diff -Naur a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_dec.c b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_dec.c
 --- a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_dec.c
 +++ b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_dec.c
-@@ -476,6 +476,15 @@
+@@ -434,6 +434,8 @@
+ 			return -EINVAL;
+ 		}
+ 	}
++	/* Progressive frames only; FIELD_ANY is not a valid answer */
++	f->fmt.pix_mp.field = V4L2_FIELD_NONE;
+ 
+ 	return 0;
+ }
+@@ -476,6 +478,15 @@
  			ctx->dec_src_buf_size = buf_size->cpb;
  		else
  			ctx->dec_src_buf_size = pix_mp->plane_fmt[0].sizeimage;
@@ -720,6 +728,20 @@ diff -Naur a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_dec.c b/drivers/medi
  		pix_mp->plane_fmt[0].bytesperline = 0;
  		ctx->state = MFCINST_INIT;
  		ret = 0;
+@@ -553,6 +564,13 @@
+ 			goto out;
+ 		s5p_mfc_hw_call(dev->mfc_ops, release_codec_buffers, ctx);
+ 		ctx->dst_bufs_cnt = 0;
++		/*
++		 * The buffers and codec memory are gone: a decoder re-opened on
++		 * this file (e.g. GStreamer renegotiating on a resolution
++		 * change) must not set up frame buffers before new ones are
++		 * requested, and must be allowed to request them.
++		 */
++		ctx->capture_state = QUEUE_FREE;
+ 	} else if (ctx->capture_state == QUEUE_FREE) {
+ 		WARN_ON(ctx->dst_bufs_cnt != 0);
+ 		mfc_debug(2, "Allocating %d buffers for CAPTURE queue\n",
 diff -Naur a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_opr_v6.c b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_opr_v6.c
 --- a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_opr_v6.c
 +++ b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_opr_v6.c

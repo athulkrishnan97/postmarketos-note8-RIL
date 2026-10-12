@@ -897,3 +897,18 @@ the work below was done offline.)
 - App playback not yet seen on screen: the phone was locked (kscreenlocker_greet), and
   Clapper's GTK sink waits for its window to render. Retest unlocked.
 - Unrelated: a panfrost WARN (panfrost_gem.c:213, dmabuf import from a QtWebEngine app).
+
+## 2026-10-12 ~13:50 YOUTUBE PLAYS IN CLAPPER ON THE MFC
+- Clapper + yt-dlp plugin: YouTube plays with v4l2h264dec, adaptive 240p-720p60, no
+  driver errors, 3-minute soak without a crash. Pipeline uses the same engine (not driven
+  remotely; try it from the app drawer after re-login).
+- Needed (all in tools/mfc/setup-youtube-apps.sh, applied on the phone):
+  /usr/lib/libgstclapper.so symlink (Clapper's GL importers could not load -> no video
+  sink); libpeas2-python3; curlhttpsrc over souphttpsrc; enhancers dir without the
+  media scanner (CLAPPER_ENHANCERS_PATH) - its second pipeline crashed libsoup.
+  Session env: ~/.config/plasma-workspace/env/gst-http.sh (next login).
+- s5p-mfc fixes from GStreamer renegotiation: capture queue state reset on REQBUFS(0),
+  FIELD_NONE in TRY_FMT. Patch updated; module rebuilt and live on the phone.
+- Caveats: legacy dashdemux cannot take the plugin's in-memory DASH manifest; the
+  yt-dlp plugin's gschemas.compiled is missing (its settings, e.g. codec order, fall
+  back to defaults: avc1 first).
