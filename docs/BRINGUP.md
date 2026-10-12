@@ -938,6 +938,17 @@ leftover from section 17, where it changed nothing); removed.
     corners; video dimmed). Workaround GSK_RENDERER=cairo per app (MFC
     section) costs ~5x CPU on video. Find the Mesa bug (suspect: GTK's
     per-instance vertex data reads as zero), patch, rebuild Mesa.
+[ ] TO FIX (parked 2026-10-12): call audio. Calls connect and stay up (2G;
+    CP voice firmware VSS runs on the ABOX with the module from
+    tools/modem/wip, gear capped at 590 MHz), but the downlink is digital
+    silence and the mics are not routed. Notes: tools/modem/wip/README.md.
+[ ] Spectacle's autostarted --dbus service busy-loops at ~80% CPU on this
+    phone (heats it up). Autostart disabled for the user
+    (~/.config/autostart/spectacle.desktop, Hidden=true).
+[ ] mifmon: after a 2G -> LTE switch, if the data call dropped, the attach
+    retry loop (CGDCONT every 10 s) can starve the AT+CGATT=1 it should send;
+    a modem-ipc restart recovers. A mode set right before a reboot may not
+    reach the CP's NV.
 [x] Browser start-up freeze: firmware-owned RAM was not reserved (section 17).
 [ ] Consider re-pairing resilience: a tiny phone-side script for
     discoverable/agent state if bonds break again.

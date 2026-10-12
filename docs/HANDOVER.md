@@ -989,3 +989,14 @@ the work below was done offline.)
 - Phone state: experimental ABOX module installed (backup in /root),
   /etc/modprobe.d/abox-debug.conf, network mode 2G, ModemManager --debug.
   Details and next steps: tools/modem/wip/README.md.
+
+## 2026-10-12 ~19:30 CALL AUDIO PARKED, PHONE RESTORED FOR DAILY USE
+- Kept: ABOX module with real VSS memory (calls no longer crash the CP),
+  /etc/modprobe.d/abox-vss.conf = "options snd_soc_samsung_abox gear_min=2"
+  (gear = ABOX's Cortex-A7, not the main CPUs). Original module:
+  /root/snd-soc-samsung-abox.ko.pre-vss. fw_log off.
+- ModemManager back to normal (D-Bus service Exec and conf.d restored from the
+  .orig copies). Network mode 2g|3g|4g; after a modem-ipc restart: LTE, data OK.
+- Phone heat was Spectacle's autostarted daemon spinning (also my test streams
+  and an inhibitor during testing). Spectacle autostart hidden for the user.
+- Idle after restore: load ~1.4 falling, 50 C.
