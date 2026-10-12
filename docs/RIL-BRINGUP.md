@@ -213,3 +213,38 @@ sudo nmcli c add type gsm ifname '*' con-name 'Mobile data' gsm.apn '' \
 With MIFMON_MM=yes mifmon brings the data call up only when ModemManager asks
 (AT+CGACT) and NetworkManager configures rmnet0 (static IP, route, DNS); the
 phone UI's mobile data switch drives it.
+
+## 8. SMS
+
+Sending works through ModemManager's AT path (AT+CMGS in PDU mode). The CP
+prompts with `\n> ` where ModemManager waits for `\r\n> `; mifmon passes the
+prompt on in that form, and sends ESC if ModemManager abandons a message (a CP
+left in text entry takes every later command as message text).
+
+Receiving does not go over AT at all: the CP sends each SMS as an IPC frame
+(SMS_INCOMING_MSG, 04 02) and the network resends it until the AP acknowledges
+it with SMS_DELIVER_REPORT (04 06). With `-M`, mifmon acknowledges at once,
+keeps the PDU, announces it to ModemManager as `+CMTI: "SM",200..215` and
+answers ModemManager's `AT+CMGR` / `AT+CMGD` for those indices itself.
+Plasma's Spacebar daemon then stores the message and deletes it from the modem.
+Frame layouts are in the header comments of `tools/modem/mifmon.c`.
+
+Tested on LTE (no CS registration needed: SMS over SGs) and on GSM.
+
+Experiments next to the running service: mifmon reads lines from the FIFO
+`/run/mifmon.ctl` - `fmt <group> <index> <type> [data]` (hex, header filled in)
+or `at <command>`.
+
+Network mode (RAT bitmask, stored in the CP's NV across reboots): NET 08 0a,
+`fmt 08 0a 02` reads it, `fmt 08 0a 03 0b` sets LTE+WCDMA+GSM (01 GSM,
+02 WCDMA, 08 LTE).
+
+## 9. Calls (not working yet)
+
+- This SIM (Lidl Connect, an MVNO on eir) gets no circuit-switched registration
+  on LTE (+CREG 0; the CP reports no CS domain), only SMS over SGs. Voice on LTE
+  would need VoLTE (IMS). On GSM (`fmt 08 0a 03 01`) CS registers within ~20 s.
+- ModemManager reports no voice capability: it probes with ATH, which the CP
+  refuses (+CME ERROR: 3). Call control is IPC (CALL group 02), like incoming SMS.
+- Changing the network mode while an IPC data call is up wedged the AT channel
+  once (no replies at all); a CP restart (`rc-service modem-ipc restart`) fixed it.

@@ -933,6 +933,11 @@ leftover from section 17, where it changed nothing); removed.
 [ ] GPU/display: simpledrm only (llvmpipe); panfrost/Mesa for Mali-G71
     (needs G3D power domain/clocks - CMU_G3D not modeled yet either).
 [x] UFS internal storage driver (2026-10-06, section 16).
+[ ] TO FIX (parked 2026-10-12): Mesa/Panfrost on Mali-G71 draws GTK4 apps
+    wrong under GTK's GL and Vulkan renderers (no text, icons, rounded
+    corners; video dimmed). Workaround GSK_RENDERER=cairo per app (MFC
+    section) costs ~5x CPU on video. Find the Mesa bug (suspect: GTK's
+    per-instance vertex data reads as zero), patch, rebuild Mesa.
 [x] Browser start-up freeze: firmware-owned RAM was not reserved (section 17).
 [ ] Consider re-pairing resilience: a tiny phone-side script for
     discoverable/agent state if bonds break again.

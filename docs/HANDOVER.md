@@ -923,3 +923,27 @@ the work below was done offline.)
   1080p30 local playback ~121% of a core vs ~26% under GL.
 - Open: find the Mesa bug (GTK uses instanced vertex data; suspect it reads as zero) to
   get the GL path back; other GTK4 apps need the same env until then.
+
+## 2026-10-12 ~15:30 SMS WORKS (SEND + RECEIVE); CALLS INVESTIGATED
+- Mesa/G71 GTK bug parked in BRINGUP.md's TODO list ("TO FIX").
+- Send: AT+CMGS stalled because the CP prompts "\n> " and ModemManager waits for
+  "\r\n> " (MM then timed out, the CP stayed in text entry and later reset). mifmon
+  rewrites the prompt and sends ESC if MM abandons a message. Sent fine on LTE and GSM.
+- Receive: the CP never reports incoming SMS on AT; they arrive as IPC SMS_INCOMING_MSG
+  (04 02) with the PDU and are resent by the network until SMS_DELIVER_REPORT (04 06,
+  layout from libsec-ril IpcTxDeliveryReport). mifmon acks, keeps them, announces
+  +CMTI "SM" 200+ and serves MM's CMGR/CMGD. Self-addressed tests landed in Spacebar.
+- mifmon: control FIFO /run/mifmon.ctl (fmt/at lines) for experiments.
+- CS domain: on LTE the CP reports only EPS + GPRS domains; +CREG 0 (a +CREG 1 seen after
+  a GSM detour was stale). NET_REGIST (08 05) decoded from libsec-ril IpcRxNetRegState:
+  [7] act (0x21 LTE, 03/04 GSM), [8] domain (01 EPS, 02 CS, 03 GPRS), [9] state
+  (1 none, 2 home, 3 searching, 4 denied, 6 roaming, 7 limited). Service domain config
+  (08 08) = 01 = CS+PS; network mode (08 0a) = RAT bitmask, 0x0b default.
+- ModemManager is in --debug mode for this work: the D-Bus activation file
+  /usr/share/dbus-1/system-services/org.freedesktop.ModemManager1.service has
+  "--debug" (original in /root/mm-dbus.service.orig; /etc/conf.d/modemmanager also got
+  modemmanager_opts="--debug" appended, original /etc/conf.d/modemmanager.orig if
+  created). Revert when done.
+- Next: calls. MM sees no voice (CP refuses ATH). Calls need IPC CALL (02 xx) bridging
+  in mifmon + the audio path (VSS, ABOX routing, mics), and CS only exists on GSM for
+  this SIM (no CSFB on LTE; VoLTE would need IMS).

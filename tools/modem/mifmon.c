@@ -27,6 +27,12 @@
  *   mifmon -r [-e efs-dir]     also answer the CP's RFS (file/NV) requests
  *                              (default /var/lib/android-modem/efs)
  *
+ * While running, lines written to the FIFO /run/mifmon.ctl are sent to the
+ * CP (for experiments next to the services):
+ *   fmt <group> <index> <type> [data...]   IPC frame, hex, header filled in
+ *   at <command>                           AT command on umts_router,
+ *                                          between ModemManager's commands
+ *
  * Only one process may read umts_ipc0: a second reader steals the CP's
  * replies. So the data call is set up from here rather than by a separate
  * tool.
@@ -713,6 +719,9 @@ static struct {
 	char own[160];		/* our command waiting for MM to finish */
 	int own_wait;
 	int own_active;		/* our command sent, final result not seen */
+	time_t prompt;		/* "> " (SMS text entry) given to MM, when */
+	int ctl;		/* own command is from /run/mifmon.ctl */
+	char ctlrx[1024];	/* its output so far */
 } px = { .fd = -1, .router = -1 };
 
 static int at_final(const char *s)
@@ -723,6 +732,7 @@ static int at_final(const char *s)
 }
 
 static void at_send_now(const char *cmd);
+static time_t now_s(void);
 
 /* MM may talk again: release what it queued, or run our waiting command */
 static void px_idle(void)
@@ -748,6 +758,120 @@ static void px_reply(const char *r)
 {
 	if (px.fd >= 0 && write(px.fd, r, strlen(r)) < 0)
 		perror("mifmon: write wwan_at_ctl");
+}
+
+/*
+ * Incoming SMS. The CP does not report them on the AT channel (+CMT/+CMTI)
+ * but as SMS_INCOMING_MSG over IPC (04 02, decoded from the stock
+ * libsec-ril, IpcRxIncomingMsg): u8 type (2 = GSM), u8 tid, u16 sim index
+ * (ffff), u8 ?, u8 pdu length, pdu (SMSC address + TPDU). The network
+ * resends a message until it is acknowledged with SMS_DELIVER_REPORT
+ * (04 06 EXEC, IpcTxDeliveryReport): u8 type, u16 result (0 = ok), u8 tid,
+ * u8 0. Messages are acknowledged at once and kept here; with -M they are
+ * announced to ModemManager as +CMTI: "SM",<n> with n from SMS_IDX_BASE up,
+ * and its AT+CMGR / AT+CMGD for those indices are answered here (the SIM
+ * storage is never used).
+ */
+#define SMS_SLOTS	16
+#define SMS_IDX_BASE	200
+
+static struct sms {
+	int used;
+	int read;		/* ModemManager fetched it */
+	time_t told;		/* last +CMTI, 0 = not yet */
+	unsigned int tpdu_len;
+	char hex[2 * 256 + 1];	/* SMSC + TPDU */
+} inbox[SMS_SLOTS];
+
+static void sms_incoming(const uint8_t *p, size_t n)
+{
+	uint8_t ack[12] = { 0 };
+	size_t len, i;
+	struct sms *m = NULL;
+
+	if (n < 13 || p[7] != 2)
+		return;
+	len = p[12];
+	ack[4] = 0x04;		/* SMS */
+	ack[5] = 0x06;		/* DELIVER_REPORT */
+	ack[6] = 0x01;		/* EXEC */
+	ack[7] = 2;		/* GSM */
+	ack[10] = p[8];		/* tid */
+	fmt_send(ack, sizeof(ack));
+	if (n < 13 + len || len < 2 || p[13] + 1u >= len)
+		return;
+	for (i = 0; i < SMS_SLOTS; i++)
+		if (!inbox[i].used) {
+			m = &inbox[i];
+			break;
+		}
+	stamp();
+	if (!m) {
+		printf("SMS incoming: inbox full, dropped\n");
+		return;
+	}
+	memset(m, 0, sizeof(*m));
+	m->used = 1;
+	m->tpdu_len = len - p[13] - 1;
+	for (i = 0; i < len; i++)
+		sprintf(m->hex + 2 * i, "%02X", p[13 + i]);
+	printf("SMS incoming: %zu bytes, acknowledged, slot %d\n", len,
+	       (int)(m - inbox) + SMS_IDX_BASE);
+}
+
+static void px_reply(const char *r);
+
+/* tell ModemManager about messages it has not fetched (again after 60 s) */
+static void sms_announce(void)
+{
+	char urc[64];
+	time_t now = now_s();
+	int i;
+
+	if (px.fd < 0 || px.mm_pending || px.own_active || px.own_wait)
+		return;
+	for (i = 0; i < SMS_SLOTS; i++) {
+		if (!inbox[i].used || inbox[i].read ||
+		    (inbox[i].told && now - inbox[i].told < 60))
+			continue;
+		inbox[i].told = now;
+		snprintf(urc, sizeof(urc), "\r\n+CMTI: \"SM\",%d\r\n",
+			 i + SMS_IDX_BASE);
+		px_reply(urc);
+		stamp();
+		printf("SMS +CMTI slot %d to ModemManager\n", i + SMS_IDX_BASE);
+	}
+}
+
+/* AT+CMGR=<n> / AT+CMGD=<n>[,0] for our slots; 0 = not ours */
+static int sms_at(const char *cmd)
+{
+	char out[2 * 256 + 64];
+	unsigned int idx, flag = 0;
+	struct sms *m;
+
+	if (sscanf(cmd, "AT+CMGR=%u", &idx) == 1) {
+		if (idx < SMS_IDX_BASE || idx >= SMS_IDX_BASE + SMS_SLOTS)
+			return 0;
+		m = &inbox[idx - SMS_IDX_BASE];
+		if (!m->used) {
+			px_reply("\r\n+CMS ERROR: 321\r\n");	/* invalid index */
+			return 1;
+		}
+		snprintf(out, sizeof(out), "\r\n+CMGR: %d,,%u\r\n%s\r\n\r\nOK\r\n",
+			 m->read ? 1 : 0, m->tpdu_len, m->hex);
+		m->read = 1;
+		px_reply(out);
+		return 1;
+	}
+	if (sscanf(cmd, "AT+CMGD=%u,%u", &idx, &flag) >= 1) {
+		if (idx < SMS_IDX_BASE || idx >= SMS_IDX_BASE + SMS_SLOTS)
+			return 0;
+		inbox[idx - SMS_IDX_BASE].used = 0;
+		px_reply("\r\nOK\r\n");
+		return 1;
+	}
+	return 0;
 }
 
 static void dc_mm_cgact(int on, unsigned int cid);
@@ -779,6 +903,8 @@ static int px_local(const uint8_t *p, size_t n)
 
 	if (!strcmp(cmd, "ATZ") || !strcmp(cmd, "ATZ0")) {
 		px_reply("\r\nOK\r\n");
+	} else if (sms_at(cmd)) {
+		;
 	} else if (dc.on_demand && sscanf(cmd, "AT+CGACT=%u,%u", &a, &b) == 2 && a <= 1) {
 		dc_mm_cgact(a, b);	/* replies itself, maybe later */
 	} else if (dc.on_demand && !strcmp(cmd, "AT+CGACT?")) {
@@ -800,6 +926,8 @@ static int px_local(const uint8_t *p, size_t n)
 /* bytes from ModemManager */
 static void px_mm_rx(const uint8_t *p, size_t n)
 {
+	if (px.prompt && (memchr(p, 0x1a, n) || memchr(p, 0x1b, n)))
+		px.prompt = 0;	/* PDU sent (Ctrl-Z) or cancelled (ESC) */
 	if (!px.mm_pending && !px.own_active && !px.own_wait && px_local(p, n))
 		return;
 	if (px.own_active || px.own_wait) {
@@ -845,11 +973,24 @@ static void px_forward_urcs(const uint8_t *p, size_t n)
 	}
 }
 
-/* CP output not belonging to our own command: to ModemManager */
+/*
+ * CP output not belonging to our own command: to ModemManager. The CP
+ * prompts for SMS text (AT+CMGS) with "\n> "; ModemManager waits for
+ * "\r\n> ", so the prompt is passed on in that form.
+ */
 static void px_cp_rx(const uint8_t *p, size_t n)
 {
 	size_t have = strlen(px.rx);
 
+	if (px.mm_pending && n >= 3 && !memcmp(p + n - 3, "\n> ", 3) &&
+	    (n == 3 || p[n - 4] != '\r')) {
+		if (px.fd >= 0 && (write(px.fd, p, n - 3) < 0 ||
+				   write(px.fd, "\r\n> ", 4) < 0))
+			perror("mifmon: write wwan_at_ctl");
+		if (!px.prompt)
+			px.prompt = now_s();
+		return;
+	}
 	if (px.fd >= 0 && write(px.fd, p, n) < 0)
 		perror("mifmon: write wwan_at_ctl");
 	if (!px.mm_pending)
@@ -882,11 +1023,49 @@ static void at_send(const char *cmd)
 {
 	if (px.mm_pending) {
 		/* after ModemManager's command completes */
-		snprintf(px.own, sizeof(px.own), "%s", cmd);
+		snprintf(px.own, sizeof(px.own), "%.150s", cmd);
 		px.own_wait = 1;
 		return;
 	}
 	at_send_now(cmd);
+}
+
+/* one line from /run/mifmon.ctl */
+static void ctl_line(char *l)
+{
+	uint8_t f[512];
+	size_t n;
+
+	if (!strncmp(l, "fmt ", 4)) {
+		n = parse_hex(l + 4, f + 4, sizeof(f) - 4);
+		if (n >= 3)
+			fmt_send(f, n + 4);
+	} else if (!strncmp(l, "at ", 3) && dc.at_fd >= 0 &&
+		   !px.own_active && !px.own_wait) {
+		px.ctl = 1;
+		px.ctlrx[0] = 0;
+		at_send(l + 3);
+	} else {
+		fprintf(stderr, "mifmon: ctl: bad line \"%s\"\n", l);
+	}
+}
+
+static void ctl_rx(int fd)
+{
+	static char line[1100];
+	static size_t len;
+	char c;
+
+	while (read(fd, &c, 1) == 1) {
+		if (c == '\n') {
+			line[len] = 0;
+			if (len)
+				ctl_line(line);
+			len = 0;
+		} else if (len < sizeof(line) - 1) {
+			line[len++] = c;
+		}
+	}
 }
 
 static time_t now_s(void)
@@ -1227,7 +1406,7 @@ int main(int argc, char **argv)
 	static uint8_t buf[BUF_SIZE];
 	const char *at_cmd = NULL, *fmt_hex[8];
 	int nfmt = 0;
-	struct pollfd pfd[4];
+	struct pollfd pfd[5];
 	int opt, i, data = 0, proxy = 0;
 
 	dc.cid = 1;
@@ -1281,6 +1460,12 @@ int main(int argc, char **argv)
 		if (write(pfd[0].fd, buf, n) < 0)
 			perror("mifmon: write umts_ipc0");
 	}
+	unlink("/run/mifmon.ctl");
+	if (mkfifo("/run/mifmon.ctl", 0600) == 0)
+		pfd[4].fd = open("/run/mifmon.ctl", O_RDWR | O_NONBLOCK);
+	else
+		pfd[4].fd = -1;
+	pfd[4].events = POLLIN;
 	dc.fd = pfd[0].fd;
 	dc.at_fd = pfd[2].fd;
 	rfs.fd = pfd[1].fd;
@@ -1303,6 +1488,19 @@ int main(int argc, char **argv)
 	for (;;) {
 		if (data)
 			dc_tick();
+		sms_announce();
+		if (px.prompt && now_s() - px.prompt > 20) {
+			/*
+			 * MM gave up on an SMS (no PDU after the prompt): leave
+			 * text entry, or the CP takes every later command as
+			 * message text.
+			 */
+			stamp();
+			printf("SMS prompt abandoned: ESC\n");
+			px.prompt = 0;
+			if (write(px.router, "\x1b", 1) < 0)
+				perror("mifmon: write umts_router");
+		}
 		if (px.mm_pending && px.own_wait) {
 			/* MM never got a final result: do not block our attach */
 			if (!px.mm_since)
@@ -1312,17 +1510,21 @@ int main(int argc, char **argv)
 				px_idle();
 			}
 		}
-		if (poll(pfd, 4, data || proxy ? 2000 : -1) < 0) {
+		if (poll(pfd, 5, data || proxy ? 2000 : -1) < 0) {
 			if (errno == EINTR)
 				continue;
 			perror("mifmon: poll");
 			return 1;
 		}
-		for (i = 0; i < 4; i++) {
+		for (i = 0; i < 5; i++) {
 			ssize_t n;
 
 			if (pfd[i].fd < 0 || !pfd[i].revents)
 				continue;
+			if (i == 4) {
+				ctl_rx(pfd[i].fd);
+				continue;
+			}
 			if (pfd[i].revents & (POLLERR | POLLHUP)) {
 				stamp();
 				printf("channel %d: %s (CP state change)\n", i,
@@ -1333,6 +1535,8 @@ int main(int argc, char **argv)
 				continue;
 			if (i == 0) {
 				show_fmt("rx", buf, n);
+				if (n >= 7 && buf[4] == 0x04 && buf[5] == 0x02)
+					sms_incoming(buf, n);
 				if (data)
 					dc_rx(buf, n);
 			}
@@ -1343,7 +1547,19 @@ int main(int argc, char **argv)
 					show_rfs("rx", buf, n);
 			} else if (i == 2) {
 				show_raw("ROUTER", buf, n);
-				if (data && px.own_active) {
+				if (px.own_active && px.ctl) {
+					size_t h = strlen(px.ctlrx);
+
+					if (h + n >= sizeof(px.ctlrx))
+						h = 0;
+					memcpy(px.ctlrx + h, buf, n);
+					px.ctlrx[h + n] = 0;
+					px_forward_urcs(buf, n);
+					if (at_final(px.ctlrx)) {
+						px.own_active = px.ctl = 0;
+						px_idle();
+					}
+				} else if (data && px.own_active) {
 					px_forward_urcs(buf, n);
 					dc_at_rx(buf, n);
 				} else
