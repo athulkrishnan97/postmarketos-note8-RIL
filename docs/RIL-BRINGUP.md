@@ -207,8 +207,12 @@ sudo tools/mm-plugin-shannon/build-on-device.sh   # ModemManager plugin (on the 
 # 78-greatlte-mm.rules installed (groups wwan0at0 + rmnet0, allows virtual rmnet0)
 printf 'MIFMON_DATA=yes\nMIFMON_MM=yes\n' | sudo tee /etc/conf.d/modem-ipc
 sudo nmcli c add type gsm ifname '*' con-name 'Mobile data' gsm.apn '' \
-     ipv4.route-metric 700 ipv6.method disabled
+     ipv4.route-metric 700 ipv6.method disabled connection.autoconnect-retries 0
 ```
+
+(`autoconnect-retries 0`: retry forever. With the default NetworkManager gives
+up after a few failures while the modem is detached, e.g. during a network mode
+change, and mobile data stays off.)
 
 With MIFMON_MM=yes mifmon brings the data call up only when ModemManager asks
 (AT+CGACT) and NetworkManager configures rmnet0 (static IP, route, DNS); the
@@ -235,15 +239,30 @@ Experiments next to the running service: mifmon reads lines from the FIFO
 `/run/mifmon.ctl` - `fmt <group> <index> <type> [data]` (hex, header filled in)
 or `at <command>`.
 
-Network mode (RAT bitmask, stored in the CP's NV across reboots): NET 08 0a,
-`fmt 08 0a 02` reads it, `fmt 08 0a 03 0b` sets LTE+WCDMA+GSM (01 GSM,
-02 WCDMA, 08 LTE).
+## Network mode (2G / 4G)
+
+The CP keeps its allowed radio technologies as a bitmask in NV (IPC NET 08 0a:
+01 GSM, 02 WCDMA, 08 LTE; default 0b). The shannon plugin maps ModemManager's
+modes onto it through `AT^SHNRAT?` / `AT^SHNRAT=<mask>`, which mifmon serves:
+
+```sh
+mmcli -m any --set-allowed-modes=2g          # calls (this SIM: CS only on GSM)
+mmcli -m any --set-allowed-modes='2g|3g|4g'  # back to LTE
+```
+
+Plasma Mobile's network-mode setting uses the same call. Back on LTE the CP
+stays in limited service until told to attach, as after a CP boot, so mifmon
+sends AT+CGATT=1 five seconds after the change; NetworkManager then reconnects.
+mifmon also answers ModemManager's AT+CGDCONT=? itself: right after a CP boot
+its own AT+CGATT=1 can hold the channel past ModemManager's timeout, and
+ModemManager then believed the modem had no IP support.
 
 ## 9. Calls (not working yet)
 
 - This SIM (Lidl Connect, an MVNO on eir) gets no circuit-switched registration
   on LTE (+CREG 0; the CP reports no CS domain), only SMS over SGs. Voice on LTE
-  would need VoLTE (IMS). On GSM (`fmt 08 0a 03 01`) CS registers within ~20 s.
+  would need VoLTE (IMS). On GSM (`mmcli -m any --set-allowed-modes=2g`) CS registers within ~20 s;
+  EDGE data keeps working (ping 140-640 ms).
 - ModemManager reports no voice capability: it probes with ATH, which the CP
   refuses (+CME ERROR: 3). Call control is IPC (CALL group 02), like incoming SMS.
 - Changing the network mode while an IPC data call is up wedged the AT channel

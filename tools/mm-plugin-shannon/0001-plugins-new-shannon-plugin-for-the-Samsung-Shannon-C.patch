@@ -512,10 +512,10 @@ index 0000000..1d94300
 +#endif /* MM_BROADBAND_BEARER_SHANNON_H */
 diff --git a/src/plugins/shannon/mm-broadband-modem-shannon.c b/src/plugins/shannon/mm-broadband-modem-shannon.c
 new file mode 100644
-index 0000000..0b06009
+index 0000000..98ededa
 --- /dev/null
 +++ b/src/plugins/shannon/mm-broadband-modem-shannon.c
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,247 @@
 +/* -*- Mode: C; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
 +/*
 + * This program is free software; you can redistribute it and/or modify
@@ -532,6 +532,7 @@ index 0000000..0b06009
 +
 +#include "mm-broadband-bearer-shannon.h"
 +#include "mm-broadband-modem-shannon.h"
++#include "mm-base-modem-at.h"
 +#include "mm-iface-modem.h"
 +#include "mm-log-object.h"
 +
@@ -587,6 +588,135 @@ index 0000000..0b06009
 +}
 +
 +/*****************************************************************************/
++/* Modes (Modem interface)
++ *
++ * The CP keeps its allowed radio access technologies as a bitmask (IPC NET
++ * 08 0a; 01 GSM, 02 WCDMA, 08 LTE), stored in its NV. mifmon, which owns
++ * the IPC channel, serves it as AT^SHNRAT? / AT^SHNRAT=<mask>.
++ */
++
++#define RAT_GSM   0x01
++#define RAT_WCDMA 0x02
++#define RAT_LTE   0x08
++
++static MMModemMode
++rat_to_modes (guint rat)
++{
++    MMModemMode modes = MM_MODEM_MODE_NONE;
++
++    if (rat & RAT_GSM)
++        modes |= MM_MODEM_MODE_2G;
++    if (rat & RAT_WCDMA)
++        modes |= MM_MODEM_MODE_3G;
++    if (rat & RAT_LTE)
++        modes |= MM_MODEM_MODE_4G;
++    return modes;
++}
++
++static guint
++modes_to_rat (MMModemMode modes)
++{
++    guint rat = 0;
++
++    if (modes & MM_MODEM_MODE_2G)
++        rat |= RAT_GSM;
++    if (modes & MM_MODEM_MODE_3G)
++        rat |= RAT_WCDMA;
++    if (modes & MM_MODEM_MODE_4G)
++        rat |= RAT_LTE;
++    return rat;
++}
++
++static GArray *
++load_supported_modes_finish (MMIfaceModem  *self,
++                             GAsyncResult  *res,
++                             GError       **error)
++{
++    return g_task_propagate_pointer (G_TASK (res), error);
++}
++
++static void
++load_supported_modes (MMIfaceModem        *self,
++                      GAsyncReadyCallback  callback,
++                      gpointer             user_data)
++{
++    static const MMModemMode combos[] = {
++        MM_MODEM_MODE_2G,
++        MM_MODEM_MODE_2G | MM_MODEM_MODE_3G,
++        MM_MODEM_MODE_4G,
++        MM_MODEM_MODE_2G | MM_MODEM_MODE_3G | MM_MODEM_MODE_4G,
++    };
++    GTask   *task;
++    GArray  *array;
++    guint    i;
++
++    array = g_array_sized_new (FALSE, FALSE, sizeof (MMModemModeCombination), G_N_ELEMENTS (combos));
++    for (i = 0; i < G_N_ELEMENTS (combos); i++) {
++        MMModemModeCombination mode = { .allowed = combos[i], .preferred = MM_MODEM_MODE_NONE };
++
++        g_array_append_val (array, mode);
++    }
++    task = g_task_new (self, NULL, callback, user_data);
++    g_task_return_pointer (task, array, (GDestroyNotify) g_array_unref);
++    g_object_unref (task);
++}
++
++static gboolean
++load_current_modes_finish (MMIfaceModem  *self,
++                           GAsyncResult  *res,
++                           MMModemMode   *allowed,
++                           MMModemMode   *preferred,
++                           GError       **error)
++{
++    const gchar *response;
++    guint        rat;
++
++    response = mm_base_modem_at_command_finish (MM_BASE_MODEM (self), res, error);
++    if (!response)
++        return FALSE;
++    response = mm_strip_tag (response, "^SHNRAT:");
++    if (!mm_get_uint_from_str (response, &rat) || !rat_to_modes (rat)) {
++        g_set_error (error, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
++                     "couldn't parse RAT mask '%s'", response);
++        return FALSE;
++    }
++    *allowed = rat_to_modes (rat);
++    *preferred = MM_MODEM_MODE_NONE;
++    return TRUE;
++}
++
++static void
++load_current_modes (MMIfaceModem        *self,
++                    GAsyncReadyCallback  callback,
++                    gpointer             user_data)
++{
++    mm_base_modem_at_command (MM_BASE_MODEM (self), "^SHNRAT?", 10, FALSE,
++                              callback, user_data);
++}
++
++static gboolean
++set_current_modes_finish (MMIfaceModem  *self,
++                          GAsyncResult  *res,
++                          GError       **error)
++{
++    return !!mm_base_modem_at_command_finish (MM_BASE_MODEM (self), res, error);
++}
++
++static void
++set_current_modes (MMIfaceModem        *self,
++                   MMModemMode          allowed,
++                   MMModemMode          preferred,
++                   GAsyncReadyCallback  callback,
++                   gpointer             user_data)
++{
++    g_autofree gchar *command = NULL;
++
++    command = g_strdup_printf ("^SHNRAT=%u", modes_to_rat (allowed));
++    mm_base_modem_at_command (MM_BASE_MODEM (self), command, 10, FALSE,
++                              callback, user_data);
++}
++
++/*****************************************************************************/
 +
 +MMBroadbandModemShannon *
 +mm_broadband_modem_shannon_new (const gchar  *device,
@@ -621,6 +751,12 @@ index 0000000..0b06009
 +
 +    iface->create_bearer = modem_create_bearer;
 +    iface->create_bearer_finish = modem_create_bearer_finish;
++    iface->load_supported_modes = load_supported_modes;
++    iface->load_supported_modes_finish = load_supported_modes_finish;
++    iface->load_current_modes = load_current_modes;
++    iface->load_current_modes_finish = load_current_modes_finish;
++    iface->set_current_modes = set_current_modes;
++    iface->set_current_modes_finish = set_current_modes_finish;
 +}
 +
 +static void

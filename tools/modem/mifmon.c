@@ -733,6 +733,7 @@ static int at_final(const char *s)
 
 static void at_send_now(const char *cmd);
 static time_t now_s(void);
+static int own_at(const char *cmd);
 
 /* MM may talk again: release what it queued, or run our waiting command */
 static void px_idle(void)
@@ -874,6 +875,79 @@ static int sms_at(const char *cmd)
 	return 0;
 }
 
+/*
+ * Allowed radio access technologies, for ModemManager's shannon plugin:
+ * AT^SHNRAT? / AT^SHNRAT=<mask> map onto IPC NET_MODE_SEL (08 0a, a bitmask:
+ * 01 GSM, 02 WCDMA, 08 LTE; kept in the CP's NV). Answered when the CP
+ * replies (RESP 08 0a, or GEN_PHONE_RES for the SET).
+ */
+static struct {
+	int get;		/* AT^SHNRAT? waiting for the CP */
+	int set;		/* AT^SHNRAT= waiting for the CP */
+	time_t since;
+	unsigned int mask;	/* last mask set */
+	time_t attach;		/* when to send AT+CGATT=1, 0 = no */
+} rat;
+
+static int rat_at(const char *cmd)
+{
+	uint8_t f[8] = { 0 };
+	unsigned int mask;
+
+	f[4] = 0x08;
+	f[5] = 0x0a;
+	if (!strcmp(cmd, "AT^SHNRAT?")) {
+		f[6] = 0x02;	/* GET */
+		fmt_send(f, 7);
+		rat.get = 1;
+	} else if (sscanf(cmd, "AT^SHNRAT=%u", &mask) == 1 && mask && mask < 0x100) {
+		f[6] = 0x03;	/* SET */
+		f[7] = mask;
+		fmt_send(f, 8);
+		rat.set = 1;
+		rat.mask = mask;
+	} else {
+		return 0;
+	}
+	rat.since = now_s();
+	return 1;
+}
+
+static void rat_rx(const uint8_t *p, size_t n)
+{
+	char out[48];
+
+	if (rat.get && n >= 8 && p[4] == 0x08 && p[5] == 0x0a && p[6] == 0x02) {
+		rat.get = 0;
+		snprintf(out, sizeof(out), "\r\n^SHNRAT: %u\r\n\r\nOK\r\n", p[7]);
+		px_reply(out);
+	} else if (rat.set && n >= 12 && p[4] == 0x80 && p[5] == 0x01 &&
+		   p[7] == 0x08 && p[8] == 0x0a) {
+		rat.set = 0;
+		if ((p[10] | p[11] << 8) != 0x8000) {
+			px_reply("\r\nERROR\r\n");
+			return;
+		}
+		px_reply("\r\nOK\r\n");
+		/*
+		 * Back on LTE the CP stays in limited service until it is told
+		 * to attach, as after a CP boot.
+		 */
+		if (rat.mask & 0x08)
+			rat.attach = now_s() + 5;
+	}
+}
+
+static void rat_tick(void)
+{
+	if (rat.attach && now_s() >= rat.attach && own_at("AT+CGATT=1"))
+		rat.attach = 0;
+	if ((rat.get || rat.set) && now_s() - rat.since > 5) {
+		rat.get = rat.set = 0;
+		px_reply("\r\nERROR\r\n");
+	}
+}
+
 static void dc_mm_cgact(int on, unsigned int cid);
 static void dc_mm_status(char *out, size_t len);
 static int dc_mm_contrdp(char *out, size_t len);
@@ -903,7 +977,15 @@ static int px_local(const uint8_t *p, size_t n)
 
 	if (!strcmp(cmd, "ATZ") || !strcmp(cmd, "ATZ0")) {
 		px_reply("\r\nOK\r\n");
-	} else if (sms_at(cmd)) {
+	} else if (!strcmp(cmd, "AT+CGDCONT=?")) {
+		/*
+		 * The CP's fixed answer. Asked by ModemManager right after a CP
+		 * boot, when our AT+CGATT=1 can hold the channel for longer than
+		 * its timeout; without it ModemManager sees no IP support.
+		 */
+		px_reply("\r\n+CGDCONT: (1-11),\"IP\",,,(0-3),(0-4)\r\n"
+			 "\r\n+CGDCONT: (1-11),\"PPP\",,,(0-3),(0-4)\r\n\r\nOK\r\n");
+	} else if (sms_at(cmd) || rat_at(cmd)) {
 		;
 	} else if (dc.on_demand && sscanf(cmd, "AT+CGACT=%u,%u", &a, &b) == 2 && a <= 1) {
 		dc_mm_cgact(a, b);	/* replies itself, maybe later */
@@ -928,7 +1010,8 @@ static void px_mm_rx(const uint8_t *p, size_t n)
 {
 	if (px.prompt && (memchr(p, 0x1a, n) || memchr(p, 0x1b, n)))
 		px.prompt = 0;	/* PDU sent (Ctrl-Z) or cancelled (ESC) */
-	if (!px.mm_pending && !px.own_active && !px.own_wait && px_local(p, n))
+	/* answered here even while our own command holds the CP */
+	if (!px.mm_pending && !px.qlen && px_local(p, n))
 		return;
 	if (px.own_active || px.own_wait) {
 		if (px.qlen + n <= sizeof(px.q)) {
@@ -1030,6 +1113,17 @@ static void at_send(const char *cmd)
 	at_send_now(cmd);
 }
 
+/* our own AT command outside the data call sequence; 0 if busy */
+static int own_at(const char *cmd)
+{
+	if (dc.at_fd < 0 || px.own_active || px.own_wait)
+		return 0;
+	px.ctl = 1;
+	px.ctlrx[0] = 0;
+	at_send(cmd);
+	return 1;
+}
+
 /* one line from /run/mifmon.ctl */
 static void ctl_line(char *l)
 {
@@ -1040,11 +1134,8 @@ static void ctl_line(char *l)
 		n = parse_hex(l + 4, f + 4, sizeof(f) - 4);
 		if (n >= 3)
 			fmt_send(f, n + 4);
-	} else if (!strncmp(l, "at ", 3) && dc.at_fd >= 0 &&
-		   !px.own_active && !px.own_wait) {
-		px.ctl = 1;
-		px.ctlrx[0] = 0;
-		at_send(l + 3);
+	} else if (!strncmp(l, "at ", 3) && own_at(l + 3)) {
+		;
 	} else {
 		fprintf(stderr, "mifmon: ctl: bad line \"%s\"\n", l);
 	}
@@ -1489,6 +1580,7 @@ int main(int argc, char **argv)
 		if (data)
 			dc_tick();
 		sms_announce();
+		rat_tick();
 		if (px.prompt && now_s() - px.prompt > 20) {
 			/*
 			 * MM gave up on an SMS (no PDU after the prompt): leave
@@ -1537,6 +1629,7 @@ int main(int argc, char **argv)
 				show_fmt("rx", buf, n);
 				if (n >= 7 && buf[4] == 0x04 && buf[5] == 0x02)
 					sms_incoming(buf, n);
+				rat_rx(buf, n);
 				if (data)
 					dc_rx(buf, n);
 			}

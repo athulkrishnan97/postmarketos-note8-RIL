@@ -947,3 +947,14 @@ the work below was done offline.)
 - Next: calls. MM sees no voice (CP refuses ATH). Calls need IPC CALL (02 xx) bridging
   in mifmon + the audio path (VSS, ABOX routing, mics), and CS only exists on GSM for
   this SIM (no CSFB on LTE; VoLTE would need IMS).
+
+## 2026-10-12 ~16:00 NETWORK MODE SWITCH (2G <-> 4G) THROUGH MODEMMANAGER
+- shannon plugin: supported modes 2g / 2g+3g / 4g / 2g+3g+4g, current/set via AT^SHNRAT
+  (mifmon -> IPC 08 0a). Patch regenerated; applies to MM d776ea38; built on the phone.
+- mifmon: AT+CGATT=1 5 s after a mode change that includes LTE (else limited service),
+  local AT+CGDCONT=? (was timing out behind our boot-time CGATT -> MM saw no IPv4 and NM
+  refused to connect), local commands answered even while our own command runs.
+- NM "Mobile data": connection.autoconnect-retries 0 (it had given up during the switch).
+- Tested: LTE -> 2G (EDGE data OK) -> LTE: data back without intervention.
+- IPC CALL group decoded (background agent, from libsec-ril IpcProtocol41): see the
+  header comment of the call code in mifmon once written. Next: call bridge.
