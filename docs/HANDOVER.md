@@ -979,3 +979,13 @@ the work below was done offline.)
   rebooted (installed module unchanged, audio back). Leads in tools/modem/wip/README.md.
 - mifmon now writes the ABOX start_vss attribute at CP power-up (no-op without it).
 - Network mode back to 2g|3g|4g.
+
+## 2026-10-12 ~17:30 CALLS STABLE (VSS RUNNING), NO AUDIO YET
+- ABOX module with real VSS memory: the firmware starts VSS by itself at boot
+  (CP magic). The CP crash at 20 s came from the firmware hanging at gear 1
+  (1.18 GHz) that VSS asks for at call setup. gear_min=2 fixes it.
+- "call" attribute starts RDMA4/WDMA2; VSS takes them over. A real incoming
+  call (user) and outgoing calls stay up; downlink buffer stays zero.
+- Phone state: experimental ABOX module installed (backup in /root),
+  /etc/modprobe.d/abox-debug.conf, network mode 2G, ModemManager --debug.
+  Details and next steps: tools/modem/wip/README.md.

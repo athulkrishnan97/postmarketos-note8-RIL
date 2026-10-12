@@ -1,0 +1,393 @@
+--- a/sound/soc/samsung/abox/abox.h
++++ b/sound/soc/samsung/abox/abox.h
+@@ -104,6 +104,10 @@
+ 		u32 gear;
+ 	} gear_req[8];			/* A7 clock requests from the firmware */
+ 
++	/* The modem's voice firmware (VSS), run by the Calliope firmware */
++	bool vss_mapped;		/* its memory is mapped */
++	bool vss_wanted;		/* start it whenever the firmware boots */
++
+ 	/* PCM side: DMA interrupts and IPC replies other than system ones */
+ 	void *pcm;
+ 	void (*dma_irq)(void *priv, unsigned int id,
+@@ -116,6 +120,7 @@
+ 		  size_t size);
+ void *abox_iova_to_virt(struct abox_data *data, u32 iova);
+ int abox_pcm_register(struct abox_data *data);
++int abox_pcm_call(struct abox_data *abox, bool on);
+ void abox_uaif_clk_enable(struct abox_data *data, unsigned int id,
+ 			  bool external_bclk);
+ int abox_uaif_set_bclk(struct abox_data *data, unsigned int id,
+--- a/sound/soc/samsung/abox/abox.c
++++ b/sound/soc/samsung/abox/abox.c
+@@ -24,6 +24,7 @@
+ #include <linux/mfd/syscon.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
++#include <linux/of_address.h>
+ #include <linux/of_reserved_mem.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_runtime.h>
+@@ -255,6 +256,10 @@
+ 	return NULL;
+ }
+ 
++static bool fw_log;
++module_param(fw_log, bool, 0644);
++MODULE_PARM_DESC(fw_log, "Print the firmware's log (bring-up)");
++
+ static void abox_log_flush(struct abox_data *data)
+ {
+ 	struct abox_log_buffer *log = data->log;
+@@ -281,7 +286,9 @@
+ 			line[n++] = c;
+ 		}
+ 		line[n] = '\0';
+-		if (n)
++		if (n && fw_log)
++			dev_info(data->dev, "fw: %s\n", line);
++		else if (n)
+ 			dev_dbg(data->dev, "fw: %s\n", line);
+ 	}
+ 	WRITE_ONCE(log->index_reader, r);
+@@ -303,6 +310,15 @@
+  * the new rate to be confirmed. Requests are tracked per requester id and
+  * the fastest one wins.
+  */
++/*
++ * Gear 1 is the PLL rate itself (1.18 GHz), asked for by the voice firmware
++ * at call setup. Downstream raises the INT bus QoS with it, which we don't
++ * have; bring-up knob to cap the clock.
++ */
++static unsigned int gear_min = 1;
++module_param(gear_min, uint, 0644);
++MODULE_PARM_DESC(gear_min, "Fastest CPU gear allowed (1 = PLL rate)");
++
+ static void abox_change_gear(struct abox_data *data, u32 gear, u32 id)
+ {
+ 	struct abox_ipc_msg msg = {
+@@ -328,7 +344,7 @@
+ 		if (data->gear_req[i].id && data->gear_req[i].gear &&
+ 		    data->gear_req[i].gear < best)
+ 			best = data->gear_req[i].gear;
+-	best = clamp(best, 1U, (unsigned int)CPU_GEAR_MAX);
++	best = clamp(best, max(gear_min, 1U), (unsigned int)CPU_GEAR_MAX);
+ 
+ 	writel(best - 1, data->cmu + CMU_DIV_CLK_ABOX_PLL);
+ 	rate = AUD_PLL_RATE_HZ / best;
+@@ -495,12 +511,52 @@
+ 	return ret;
+ }
+ 
++/*
++ * Where the modem keeps VSS: the modem's reserved memory ("exynos,modem_if")
++ * holds the CP image (shmem,cp_size of the shared memory node) followed by
++ * VSS (shmem,vss_size), as the modem driver lays it out.
++ */
++static int abox_vss_region(struct device *dev, phys_addr_t *phys, u32 *size)
++{
++	struct device_node *np;
++	struct resource res;
++	u32 cp_size = 0;
++	int ret;
++
++	np = of_find_compatible_node(NULL, NULL, "exynos,modem_if");
++	if (!np)
++		return -ENODEV;
++	ret = of_address_to_resource(np, 0, &res);
++	of_node_put(np);
++	if (ret)
++		return ret;
++
++	np = of_find_compatible_node(NULL, NULL, "samsung,exynos-shm_ipc");
++	if (!np)
++		return -ENODEV;
++	ret = of_property_read_u32(np, "shmem,cp_size", &cp_size);
++	if (!ret)
++		ret = of_property_read_u32(np, "shmem,vss_size", size);
++	of_node_put(np);
++	if (ret)
++		return ret;
++
++	*size = PAGE_ALIGN(*size);
++	if (!*size || *size > VSS_FIRMWARE_SIZE ||
++	    cp_size + *size > resource_size(&res))
++		return -EINVAL;
++	*phys = res.start + cp_size;
++	return 0;
++}
++
+ static int abox_setup_memory(struct abox_data *data)
+ {
+ 	struct device *dev = data->dev;
+ 	struct resource res;
+ 	int prot = IOMMU_READ | IOMMU_WRITE;
+ 	unsigned long iova;
++	phys_addr_t vss_phys;
++	u32 vss_size;
+ 	int ret;
+ 
+ 	ret = of_reserved_mem_region_to_resource(dev->of_node, 0, &res);
+@@ -567,13 +623,23 @@
+ 		ret = abox_map(data, CHIPID_BASE, data->scratch_phys, SZ_4K,
+ 			       IOMMU_READ);
+ 	/*
+-	 * Downstream maps the modem's voice firmware (VSS) here. There is no
+-	 * modem support, but the firmware writes into this window as soon as
+-	 * it boots; left unmapped, that is a SysMMU fault storm which can
+-	 * lock up the phone. Back the window with the dummy page.
++	 * The modem's voice firmware (VSS) window: cbd loads VSS into the
++	 * modem's shared memory right after the CP image, and the Calliope
++	 * firmware runs it from here (it writes its status word as soon as
++	 * it boots). The rest of the window, or all of it without a modem,
++	 * is backed with the dummy page; left unmapped, that is a SysMMU
++	 * fault storm which can lock up the phone.
+ 	 */
+-	for (iova = IOVA_VSS_FIRMWARE;
+-	     !ret && iova < IOVA_VSS_FIRMWARE + VSS_FIRMWARE_SIZE;
++	iova = IOVA_VSS_FIRMWARE;
++	if (!ret && !abox_vss_region(dev, &vss_phys, &vss_size)) {
++		ret = abox_map(data, iova, vss_phys, vss_size, prot);
++		if (!ret) {
++			data->vss_mapped = true;
++			iova += vss_size;
++			dev_info(dev, "VSS at %pa (%#x)\n", &vss_phys, vss_size);
++		}
++	}
++	for (; !ret && iova < IOVA_VSS_FIRMWARE + VSS_FIRMWARE_SIZE;
+ 	     iova += SZ_4K)
+ 		ret = abox_map(data, iova, data->scratch_phys + SZ_4K, SZ_4K,
+ 			       prot);
+@@ -626,6 +692,35 @@
+ 	return 0;
+ }
+ 
++/*
++ * The CP's voice path runs on the Calliope firmware: once cbd has loaded
++ * VSS and started the CP, the firmware has to be told to start it (and again
++ * after every boot of the firmware). Without it the CP crashes a few seconds
++ * into a call. The modem side asks through the start_vss attribute.
++ */
++static bool vss;
++module_param(vss, bool, 0644);
++MODULE_PARM_DESC(vss, "Start the modem's voice firmware when asked (bring-up)");
++
++static void abox_start_vss(struct abox_data *data)
++{
++	void __iomem *ack = data->sram + IPC_TX_ACK_OFFSET;
++	int ret, ms;
++
++	if (!data->vss_mapped || !vss)
++		return;
++	ret = abox_ipc_system(data, ABOX_START_VSS, 0, 0, 0);
++	/* the firmware may take longer than the usual 1 ms to take it */
++	for (ms = 0; ret == -ETIMEDOUT && readl(ack) && ms < 200; ms++)
++		msleep(1);
++	if (ret == -ETIMEDOUT && !readl(ack))
++		ret = 0;
++	if (ret)
++		dev_warn(data->dev, "start VSS IPC failed: %d\n", ret);
++	else
++		dev_info(data->dev, "VSS started (ack after ~%d ms)\n", ms);
++}
++
+ int abox_boot(struct abox_data *data)
+ {
+ 	struct device *dev = data->dev;
+@@ -716,6 +811,8 @@
+ 	}
+ 	if (ret)
+ 		dev_warn(dev, "resume IPC failed: %d\n", ret);
++	if (data->vss_wanted)
++		abox_start_vss(data);
+ 	goto out;
+ 
+ fail:
+@@ -750,12 +847,46 @@
+ }
+ 
+ 
++static ssize_t start_vss_store(struct device *dev,
++			       struct device_attribute *attr,
++			       const char *buf, size_t count)
++{
++	struct abox_data *data = dev_get_drvdata(dev);
++	int ret = 0;
++
++	if (!data->vss_mapped)
++		return -ENODEV;
++	data->vss_wanted = true;
++	if (data->state == ABOX_STATE_RUNNING)
++		abox_start_vss(data);
++	else
++		ret = abox_boot(data);	/* starts VSS once it is up */
++	return ret ? ret : count;
++}
++
++/* bring-up: start/stop the voice call DMAs by hand */
++static ssize_t call_store(struct device *dev, struct device_attribute *attr,
++			  const char *buf, size_t count)
++{
++	struct abox_data *data = dev_get_drvdata(dev);
++	bool on;
++	int ret = kstrtobool(buf, &on);
++
++	if (!ret)
++		ret = abox_pcm_call(data, on);
++	return ret ? ret : count;
++}
++
+ static DEVICE_ATTR_WO(boot);
+ static DEVICE_ATTR_RO(state);
++static DEVICE_ATTR_WO(call);
++static DEVICE_ATTR_WO(start_vss);
+ 
+ static struct attribute *abox_attrs[] = {
+ 	&dev_attr_boot.attr,
+ 	&dev_attr_state.attr,
++	&dev_attr_start_vss.attr,
++	&dev_attr_call.attr,
+ 	NULL
+ };
+ ATTRIBUTE_GROUPS(abox);
+--- a/sound/soc/samsung/abox/abox_pcm.c
++++ b/sound/soc/samsung/abox/abox_pcm.c
+@@ -89,6 +89,8 @@
+ 	ABOX_DMA_PLAYBACK,
+ 	ABOX_DMA_CAPTURE,
+ 	ABOX_DMA_SPEAKER,
++	ABOX_DMA_CALL_DL,	/* modem voice: RDMA4, fed by the firmware's VSS */
++	ABOX_DMA_CALL_UL,	/* WDMA2, drained by VSS */
+ 	ABOX_DMA_NUM,
+ };
+ 
+@@ -397,6 +399,105 @@
+ 			       vma->vm_end - vma->vm_start, vma->vm_page_prot);
+ }
+ 
++/*
++ * Voice calls. The CP's voice firmware (VSS) runs on the ABOX and plays the
++ * downlink into the "call" RDMA4 and takes the uplink from the "call" WDMA2,
++ * like the stock audio HAL's call PCMs: started as ordinary PCM tasks, but
++ * no data comes from here. Routing as the HAL's: RDMA4 (ASRC) -> mixer
++ * (SIFS0) -> UAIF0 (codec), UAIF0 -> NSRC1 -> SPUM (ASRC) -> WDMA2. The
++ * codec's interface has to run meanwhile (an open stream on it).
++ */
++#define CALL_RATE		48000
++#define CALL_CHANNELS		2
++#define CALL_PERIOD_BYTES	(960 * CALL_CHANNELS * 2)
++#define CALL_PERIODS		4
++#define CALL_UL_NSRC		1
++
++static void fill_call_setbuff(struct abox_ipc_pcmtask *t, void *arg)
++{
++	t->param.setbuff.phyaddr = (u32)(unsigned long)arg;
++	t->param.setbuff.size = CALL_PERIOD_BYTES;
++	t->param.setbuff.count = CALL_PERIODS;
++}
++
++static void fill_call_hw_params(struct abox_ipc_pcmtask *t, void *arg)
++{
++	t->param.hw_params.sample_rate = CALL_RATE;
++	t->param.hw_params.bit_depth = 16;
++	t->param.hw_params.channels = CALL_CHANNELS;
++}
++
++static void abox_route_call(struct abox_data *abox)
++{
++	struct abox_pcm *pcm = abox->pcm;
++	unsigned int rdma = pcm->dma[ABOX_DMA_CALL_DL].id;
++	u32 val;
++
++	val = readl(abox->sfr + ABOX_SPUS_CTRL0);
++	val &= ~(0xf << SPUS_CHAIN_SHIFT(rdma));
++	val |= (SPUS_CHAIN_ASRC | SPUS_CHAIN_OUT_SIFS0) << SPUS_CHAIN_SHIFT(rdma);
++	writel(val, abox->sfr + ABOX_SPUS_CTRL0);
++
++	val = readl(abox->sfr + ABOX_ROUTE_CTRL1);
++	val &= ~(0xf << ROUTE_NSRC_SHIFT(CALL_UL_NSRC));
++	val |= ROUTE_NSRC_UAIF(0) << ROUTE_NSRC_SHIFT(CALL_UL_NSRC);
++	writel(val, abox->sfr + ABOX_ROUTE_CTRL1);
++
++	val = readl(abox->sfr + ABOX_SPUM_CTRL0);
++	val &= ~(0xf << SPUM_CHAIN_SHIFT(CALL_UL_NSRC));
++	val |= BIT(0) << SPUM_CHAIN_SHIFT(CALL_UL_NSRC);
++	writel(val, abox->sfr + ABOX_SPUM_CTRL0);
++
++	writel(BIT(0), abox->sfr + ABOX_SPUS_CTRL2);
++	writel(BIT(2) | BIT(1) | BIT(0), abox->sfr + ABOX_SPUS_CTRL3);
++	writel(BIT(0), abox->sfr + ABOX_SPUM_CTRL2);
++	writel(0xf, abox->sfr + ABOX_SPUM_CTRL3);
++}
++
++int abox_pcm_call(struct abox_data *abox, bool on)
++{
++	struct abox_pcm *pcm = abox->pcm;
++	struct abox_dma *dma;
++	int i, ret = 0, err;
++
++	if (!pcm)
++		return -ENODEV;
++	if (on) {
++		ret = abox_boot(abox);
++		if (ret)
++			return ret;
++		abox_route_call(abox);
++	}
++	for (i = ABOX_DMA_CALL_DL; i <= ABOX_DMA_CALL_UL; i++) {
++		dma = &pcm->dma[i];
++		if (on) {
++			memset(abox->dram + (dma->iova - IOVA_BASE), 0,
++			       CALL_PERIOD_BYTES * CALL_PERIODS);
++			err = abox_dma_ipc(pcm, dma, PCM_PLTDAI_OPEN, NULL, NULL);
++			err = err ?: abox_dma_ipc(pcm, dma, PCM_SET_BUFFER,
++						  fill_call_setbuff,
++						  (void *)(unsigned long)dma->iova);
++			err = err ?: abox_dma_ipc(pcm, dma, PCM_PLTDAI_HW_PARAMS,
++						  fill_call_hw_params, NULL);
++			err = err ?: abox_dma_ipc(pcm, dma, PCM_PLTDAI_PREPARE,
++						  NULL, NULL);
++			err = err ?: abox_dma_ipc(pcm, dma, PCM_PLTDAI_TRIGGER,
++						  fill_trigger, (void *)1L);
++		} else {
++			err = abox_dma_ipc(pcm, dma, PCM_PLTDAI_TRIGGER,
++					   fill_trigger, (void *)0L);
++			abox_dma_ipc(pcm, dma, PCM_PLTDAI_HW_FREE, NULL, NULL);
++			abox_dma_ipc(pcm, dma, PCM_PLTDAI_CLOSE, NULL, NULL);
++		}
++		if (err)
++			dev_warn(abox->dev, "call %s DMA %u: %d\n", on ? "start" : "stop",
++				 dma->id, err);
++		ret = ret ?: err;
++	}
++	return ret;
++}
++EXPORT_SYMBOL_GPL(abox_pcm_call);
++
+ /* UAIF DAIs */
+ 
+ static int abox_uaif_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
+@@ -708,6 +809,22 @@
+ 		.ipcid = IPC_PCMPLAYBACK,
+ 		.irq = RDMA0_BUF_EMPTY + SPK_RDMA,
+ 	};
++	pcm->dma[ABOX_DMA_CALL_DL] = (struct abox_dma) {
++		.id = 4,
++		.iova = 0x81000000 + 4 * SZ_1M,		/* RDMA4 buffer */
++		.status = ABOX_RDMA_STATUS(4),
++		.ctrl = ABOX_RDMA_CTRL0(4),
++		.ipcid = IPC_PCMPLAYBACK,
++		.irq = ~0U,
++	};
++	pcm->dma[ABOX_DMA_CALL_UL] = (struct abox_dma) {
++		.id = 2,
++		.iova = 0x82000000 + 2 * SZ_1M,		/* WDMA2 buffer */
++		.status = ABOX_WDMA_STATUS(2),
++		.ctrl = ABOX_WDMA_CTRL(2),
++		.ipcid = IPC_PCMCAPTURE,
++		.irq = ~0U,
++	};
+ 	pcm->dma[ABOX_DMA_CAPTURE] = (struct abox_dma) {
+ 		.id = CAP_WDMA,
+ 		.iova = 0x82000000 + CAP_WDMA * SZ_1M,	/* WDMAx buffer */
