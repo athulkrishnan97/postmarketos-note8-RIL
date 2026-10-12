@@ -1169,25 +1169,33 @@ What the port is made of:
 - **SysMMUs** (0x13c80000, 0x13ca0000) report version 7.0 and are driven as v5
   (`samsung,exynos8895-sysmmu`); the vendor kernel programs them through the v5
   translation registers too.
-- **Firmware stays resident.** Once the firmware has run, the domain refuses
-  to power down (status 0x0009000f, with or without the RISC stopped), and
-  resetting a running codec without the vendor's power cycle raced into bus
-  hangs. So on v11 the codec is booted on the first open and then kept
-  powered with the firmware running (core clock gated between commands);
-  only unloading the module powers it off. Before the first open the domain
-  does power off and on cleanly. The vendor teardown order matters if the
-  codec is ever stopped: write `MFC_OFF` (0x7120) = 1 with the RISC running -
-  clearing RISC_ON first makes that write hang the bus.
+- **Q-channels and the codec lifecycle.** The bootloader enables the
+  Q-channels of the MFC block (QCH_CON_* 0x3000..0x3038 = 0x003f0003, CMU
+  controller option 0x800 = 0x10000000); a power cycle resets them to disabled
+  (0x003f0002, 0), and with them disabled every later power-down of the domain
+  fails (status 0x0009000f). CMU_MFC now saves and restores them with its
+  clock registers, as the vendor kernel does, and the codec follows the vendor
+  lifecycle: firmware booted on the first open, `MFC_OFF` (0x7120) = 1 and
+  domain off on the last close. After `MFC_OFF` the codec halts and its
+  registers abort (synchronous external abort on 0x7018) until the domain has
+  been cycled, and the domain goes off asynchronously (SysMMUs and CMU_MFC
+  suspend through deferred runtime PM), so the last close waits, with the
+  device mutex held, until genpd reports the domain off; a racing open then
+  finds a cold codec. Measured: ~14 ms per open/close including the firmware
+  boot and a power cycle; 50 back-to-back opens, 20 rotating-codec sessions,
+  parallel sessions all clean. Never write `RISC_ON` = 0 before `MFC_OFF`:
+  that write then stalls the bus.
 
 Using it: `/dev/video0` (decoder) and `/dev/video1` (encoder), group video.
 GStreamer `v4l2h264dec`, `v4l2h265dec`, `v4l2vp9dec`, ... and ffmpeg
-`*_v4l2m2m`. GStreamer copies every decoded frame into system memory when the
-consumer does not take DMA-BUFs (the driver lends it only the DPB minimum),
-and the MFC buffers are uncached, so a `fakesink` pipeline is CPU-bound
-(~22 fps at 1080p) while the decoder itself is not; players that import the
-DMA-BUFs (GPU/KMS) avoid that. `tools/mfc/mfctest.sh` has the checks used
+`*_v4l2m2m`. The decoder outputs NV12M (two non-contiguous planes), which a
+sink can only take without a copy if it accepts GstVideoMeta: `waylandsink`
+(DMA-BUF to KWin) and `glimagesink` do, zero-copy (1080p real-time playback:
+~4% of one core); plain `fakesink` does not, and then GStreamer copies every
+frame out of the uncached buffers (~22 fps at 1080p, one core busy). Use
+`fakevideosink` for benchmarks. `tools/mfc/mfctest.sh` has the checks used
 here.
 
-Boot images: v195 (Image from the patch as committed; MFC nodes + IOVA
+Boot images: v196 (Image from the patch as committed; MFC nodes + IOVA
 reservation merged into the v186 dtb with `tools/mfc/mfc_dtb_merge.py` and
 `mfc_iova_dt.py`).

@@ -116,7 +116,7 @@ diff -Naur a/drivers/clk/samsung/clk-exynos8895.c b/drivers/clk/samsung/clk-exyn
  	GATE(CLK_GOUT_CMU_MODEM_SHARED0, "gout_cmu_modem_shared0",
  	     "dout_cmu_shared0_div2", CLK_CON_GAT_GATE_CLKCMU_MODEM_SHARED0,
  	     21, 0, 0),
-@@ -3144,6 +3150,107 @@
+@@ -3144,6 +3150,141 @@
  CLK_OF_DECLARE(exynos8895_cmu_cpucl1, "samsung,exynos8895-cmu-cpucl1",
  	       exynos8895_cmu_cpucl1_init);
  
@@ -138,8 +138,42 @@ diff -Naur a/drivers/clk/samsung/clk-exynos8895.c b/drivers/clk/samsung/clk-exyn
 +#define CLK_CON_GAT_GOUT_BLK_MFC_UID_SMMU_MFCD0_IPCLKPORT_PCLK_NONSECURE 0x205c
 +#define CLK_CON_GAT_GOUT_BLK_MFC_UID_SMMU_MFCD1_IPCLKPORT_ACLK	0x2064
 +#define CLK_CON_GAT_GOUT_BLK_MFC_UID_SMMU_MFCD1_IPCLKPORT_PCLK_NONSECURE 0x2068
++#define MFC_CMU_MFC_CONTROLLER_OPTION				0x0800
++#define QCH_CON_BTM_MFCD0_QCH					0x3000
++#define QCH_CON_BTM_MFCD1_QCH					0x3004
++#define QCH_CON_LHM_AXI_P_MFC_QCH				0x3010
++#define QCH_CON_LHS_AXI_D0_MFC_QCH				0x3014
++#define QCH_CON_LHS_AXI_D1_MFC_QCH				0x3018
++#define QCH_CON_MFC_CMU_MFC_QCH					0x301c
++#define QCH_CON_MFC_QCH						0x3020
++#define QCH_CON_PMU_MFC_QCH					0x3024
++#define QCH_CON_BCM_MFCD0_QCH					0x3028
++#define QCH_CON_BCM_MFCD1_QCH					0x302c
++#define QCH_CON_SMMU_MFCD0_QCH					0x3030
++#define QCH_CON_SMMU_MFCD1_QCH					0x3034
++#define QCH_CON_SYSREG_MFC_QCH					0x3038
 +
++/*
++ * Besides the clock registers, the Q-channel controls and the controller
++ * option are saved and restored (as the vendor kernel does): the bootloader
++ * enables the Q-channels, a power cycle resets them to disabled, and with
++ * them disabled the next power-down of the MFC domain never completes.
++ */
 +static const unsigned long mfc_clk_regs[] __initconst = {
++	MFC_CMU_MFC_CONTROLLER_OPTION,
++	QCH_CON_BTM_MFCD0_QCH,
++	QCH_CON_BTM_MFCD1_QCH,
++	QCH_CON_LHM_AXI_P_MFC_QCH,
++	QCH_CON_LHS_AXI_D0_MFC_QCH,
++	QCH_CON_LHS_AXI_D1_MFC_QCH,
++	QCH_CON_MFC_CMU_MFC_QCH,
++	QCH_CON_MFC_QCH,
++	QCH_CON_PMU_MFC_QCH,
++	QCH_CON_BCM_MFCD0_QCH,
++	QCH_CON_BCM_MFCD1_QCH,
++	QCH_CON_SMMU_MFCD0_QCH,
++	QCH_CON_SMMU_MFCD1_QCH,
++	QCH_CON_SYSREG_MFC_QCH,
 +	PLL_CON0_MUX_CLKCMU_MFC_BUS_USER,
 +	CLK_CON_DIV_DIV_CLK_MFC_BUSP,
 +	CLK_CON_GAT_CLK_BLK_MFC_UID_MFC_CMU_MFC_IPCLKPORT_PCLK,
@@ -224,7 +258,7 @@ diff -Naur a/drivers/clk/samsung/clk-exynos8895.c b/drivers/clk/samsung/clk-exyn
  /* ---- CMU_G3D ------------------------------------------------------------- */
  
  /*
-@@ -3632,11 +3739,21 @@
+@@ -3632,11 +3773,21 @@
  	struct device *dev = &pdev->dev;
  
  	info = of_device_get_match_data(dev);
@@ -246,7 +280,7 @@ diff -Naur a/drivers/clk/samsung/clk-exynos8895.c b/drivers/clk/samsung/clk-exyn
  static const struct of_device_id exynos8895_cmu_of_match[] = {
  	{
  		.compatible = "samsung,exynos8895-cmu-fsys0",
-@@ -3653,6 +3770,9 @@
+@@ -3653,6 +3804,9 @@
  	}, {
  		.compatible = "samsung,exynos8895-cmu-busco",
  		.data = &busc_cmu_info,
@@ -256,7 +290,7 @@ diff -Naur a/drivers/clk/samsung/clk-exynos8895.c b/drivers/clk/samsung/clk-exyn
  	},
  	{ }
  };
-@@ -3662,6 +3782,7 @@
+@@ -3662,6 +3816,7 @@
  		.name = "exynos8895-cmu",
  		.of_match_table = exynos8895_cmu_of_match,
  		.suppress_bind_attrs = true,
@@ -351,7 +385,15 @@ diff -Naur a/drivers/media/platform/samsung/s5p-mfc/regs-mfc-v11.h b/drivers/med
 diff -Naur a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c
 --- a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c
 +++ b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c
-@@ -39,6 +39,16 @@
+@@ -12,6 +12,7 @@
+ #include <linux/io.h>
+ #include <linux/module.h>
+ #include <linux/platform_device.h>
++#include <linux/pm_domain.h>
+ #include <linux/sched.h>
+ #include <linux/slab.h>
+ #include <linux/videodev2.h>
+@@ -39,6 +40,16 @@
  module_param_named(debug, mfc_debug_level, int, 0644);
  MODULE_PARM_DESC(debug, "Debug level - higher value produces more verbose messages");
  
@@ -368,7 +410,7 @@ diff -Naur a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c b/drivers/media/pl
  static char *mfc_mem_size;
  module_param_named(mem, mfc_mem_size, charp, 0644);
  MODULE_PARM_DESC(mem, "Preallocated memory size for the firmware and context buffers");
-@@ -545,8 +555,23 @@
+@@ -545,8 +556,23 @@
  		else
  			ctx->state = MFCINST_HEAD_PARSED;
  
@@ -394,47 +436,47 @@ diff -Naur a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c b/drivers/media/pl
  				!list_empty(&ctx->src_queue)) {
  			struct s5p_mfc_buf *src_buf;
  
-@@ -856,6 +881,8 @@
- 		dev->watchdog_timer.expires = jiffies +
- 					msecs_to_jiffies(MFC_WATCHDOG_INTERVAL);
- 		add_timer(&dev->watchdog_timer);
-+		if (dev->fw_resident)
-+			goto fw_ready;
- 		ret = s5p_mfc_power_on(dev);
- 		if (ret < 0) {
- 			mfc_err("power on failed\n");
-@@ -872,7 +899,17 @@
- 		s5p_mfc_clock_off(dev);
- 		if (ret)
- 			goto err_init_hw;
-+		/*
-+		 * MFC v11 is booted once and stays powered with its firmware
-+		 * running: its power domain does not complete a power-down
-+		 * once the firmware has run, and a reset of the running codec
-+		 * can stall the interconnect. Between commands the core clock
-+		 * is gated, which halts the RISC.
-+		 */
-+		if (IS_MFCV11(dev))
-+			dev->fw_resident = true;
- 	}
-+fw_ready:
- 	/* Init videobuf2 queue for CAPTURE */
- 	q = &ctx->vq_dst;
- 	q->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-@@ -995,7 +1032,11 @@
- 		if (dev->curr_ctx == ctx->num)
- 			clear_bit(0, &dev->hw_lock);
- 		dev->num_inst--;
--		if (dev->num_inst == 0) {
-+		if (dev->num_inst == 0 && dev->fw_resident) {
-+			mfc_debug(2, "Last instance, firmware stays resident\n");
-+			timer_delete_sync(&dev->watchdog_timer);
-+			s5p_mfc_clock_off(dev);
-+		} else if (dev->num_inst == 0) {
- 			mfc_debug(2, "Last instance\n");
- 			s5p_mfc_deinit_hw(dev);
- 			timer_delete_sync(&dev->watchdog_timer);
-@@ -1222,6 +1263,8 @@
+@@ -966,6 +992,30 @@
+ 	return ret;
+ }
+ 
++/*
++ * MFC v11: once MFC_OFF has been written the codec halts and parts of it
++ * stop responding (register accesses abort) until its power domain has
++ * been cycled, so it must never be opened again in that state. The domain
++ * goes off asynchronously, after the SysMMUs and CMU_MFC suspend; wait for
++ * it with the device mutex held so that the next open finds a cold codec.
++ */
++static void s5p_mfc_v11_wait_power_off(struct s5p_mfc_dev *dev)
++{
++	struct device *d = &dev->plat_dev->dev;
++	struct generic_pm_domain *genpd;
++	int i;
++
++	if (!d->pm_domain)
++		return;
++	genpd = container_of(d->pm_domain, struct generic_pm_domain, domain);
++	for (i = 0; i < 100; i++) {
++		if (READ_ONCE(genpd->status) == GENPD_STATE_OFF)
++			return;
++		usleep_range(1000, 2000);
++	}
++	mfc_err("power domain still on after the last close\n");
++}
++
+ /* Release MFC context */
+ static int s5p_mfc_release(struct file *file)
+ {
+@@ -1002,6 +1052,8 @@
+ 			s5p_mfc_clock_off(dev);
+ 			if (s5p_mfc_power_off(dev) < 0)
+ 				mfc_err("Power off failed\n");
++			else if (IS_MFCV11(dev))
++				s5p_mfc_v11_wait_power_off(dev);
+ 		} else {
+ 			mfc_debug(2, "Shutting down clock\n");
+ 			s5p_mfc_clock_off(dev);
+@@ -1222,6 +1274,8 @@
  
  	if (IS_ENABLED(CONFIG_DMA_CMA) || exynos_is_iommu_available(dev))
  		mem_size = SZ_8M;
@@ -443,7 +485,7 @@ diff -Naur a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c b/drivers/media/pl
  
  	if (mfc_mem_size)
  		mem_size = memparse(mfc_mem_size, NULL);
-@@ -1230,8 +1273,21 @@
+@@ -1230,8 +1284,21 @@
  	if (!mfc_dev->mem_bitmap)
  		return -ENOMEM;
  
@@ -465,7 +507,7 @@ diff -Naur a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c b/drivers/media/pl
  	if (!mfc_dev->mem_virt) {
  		bitmap_free(mfc_dev->mem_bitmap);
  		dev_err(dev, "failed to preallocate %ld MiB for the firmware and context buffers\n",
-@@ -1260,8 +1316,8 @@
+@@ -1260,8 +1327,8 @@
  	mfc_dev->mem_dev[BANK_L_CTX] = mfc_dev->mem_dev[BANK_R_CTX] = dev;
  	vb2_dma_contig_set_max_seg_size(dev, DMA_BIT_MASK(32));
  
@@ -476,19 +518,7 @@ diff -Naur a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c b/drivers/media/pl
  
  	return 0;
  }
-@@ -1477,6 +1533,11 @@
- 	timer_delete_sync(&dev->watchdog_timer);
- 	flush_work(&dev->watchdog_work);
- 
-+	if (dev->fw_resident) {
-+		s5p_mfc_power_off(dev);
-+		dev->fw_resident = false;
-+	}
-+
- 	video_unregister_device(dev->vfd_enc);
- 	video_unregister_device(dev->vfd_dec);
- 	v4l2_device_unregister(&dev->v4l2_dev);
-@@ -1680,6 +1741,31 @@
+@@ -1680,6 +1747,31 @@
  	.fw_name[0]     = "s5p-mfc-v10.fw",
  };
  
@@ -520,7 +550,7 @@ diff -Naur a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c b/drivers/media/pl
  static struct s5p_mfc_buf_size_v6 mfc_buf_size_v12 = {
  	.dev_ctx        = MFC_CTX_BUF_SIZE_V12,
  	.h264_dec_ctx   = MFC_H264_DEC_CTX_BUF_SIZE_V12,
-@@ -1728,6 +1814,9 @@
+@@ -1728,6 +1820,9 @@
  		.compatible = "samsung,mfc-v10",
  		.data = &mfc_drvdata_v10,
  	}, {
@@ -541,15 +571,7 @@ diff -Naur a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_common.h b/drivers/m
  #include "regs-mfc-v12.h"
  
  #define S5P_MFC_NAME		"s5p-mfc"
-@@ -347,6 +348,7 @@
- 	enum s5p_mfc_fw_ver fw_ver;
- 	bool fw_get_done;
- 	bool risc_on; /* indicates if RISC is on or off */
-+	bool fw_resident; /* v11: firmware kept running between sessions */
- };
- 
- /*
-@@ -784,11 +786,14 @@
+@@ -784,11 +785,14 @@
  
  #define HAS_PORTNUM(dev)	(dev ? (dev->variant ? \
  				(dev->variant->port_num ? 1 : 0) : 0) : 0)
@@ -564,7 +586,7 @@ diff -Naur a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_common.h b/drivers/m
  #define IS_MFCV12(dev)		((dev)->variant->version >= 0xC0)
  #define FW_HAS_E_MIN_SCRATCH_BUF(dev) (IS_MFCV10_PLUS(dev))
  
-@@ -797,15 +802,17 @@
+@@ -797,15 +801,17 @@
  #define MFC_V7_BIT	BIT(2)
  #define MFC_V8_BIT	BIT(3)
  #define MFC_V10_BIT	BIT(5)
@@ -606,9 +628,9 @@ diff -Naur a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_ctrl.c b/drivers/med
  }
  
 +/*
-+ * Stop the v11 RISC once its bus traffic has drained. The firmware keeps
-+ * running after the last close; resetting the codec or turning it off
-+ * with transactions in flight stalls the interconnect.
++ * Stop the v11 RISC once its bus traffic has drained, before a reset (the
++ * watchdog recovery resets a running codec): resetting it with
++ * transactions in flight stalls the interconnect.
 + */
 +static void s5p_mfc_v11_risc_off(struct s5p_mfc_dev *dev)
 +{
@@ -667,8 +689,8 @@ diff -Naur a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_ctrl.c b/drivers/med
 -	s5p_mfc_reset(dev);
 +	/*
 +	 * MFC v11: as the vendor driver on the last close, only hand the core
-+	 * to hardware clock gating; stopping the RISC first makes this write
-+	 * stall the bus. (Normally not reached: the firmware stays resident.)
++	 * to hardware clock gating before the power domain goes off; stopping
++	 * the RISC first makes this write stall the bus.
 +	 */
 +	if (IS_MFCV11(dev)) {
 +		mfc_write(dev, 0x1, S5P_FIMV_MFC_CLOCK_OFF_V10);

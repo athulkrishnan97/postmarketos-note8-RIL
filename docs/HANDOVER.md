@@ -865,3 +865,21 @@ the work below was done offline.)
   1080p H.264 at 280 fps.
 - Test streams are synthetic (ffmpeg -f lavfi -i testsrc2, 720p, 5 s per codec).
 - Still untested: VC-1 decode (no encoder to make a stream), HEVC/VP8/MPEG-4/H.263 encode.
+
+## 2026-10-12 ~11:50 MFC POWER-DOWN AFTER USE AND GSTREAMER ZERO-COPY FIXED (v196)
+- Power-down after use: the bootloader enables the MFC Q-channels (QCH_CON 0x003f0003,
+  CMU option 0x10000000); the first power cycle reset them to disabled and every later
+  power-down failed. CMU_MFC now saves/restores them (found by dumping CMU_MFC with
+  devmem before and after a cycle). The "firmware resident" workaround is gone: firmware
+  boots per first open, MFC_OFF=1 + domain off on last close (vendor lifecycle).
+- Then a warm re-open race showed up: the domain goes off asynchronously, an open in
+  that window hit a halted codec (synchronous external abort reading 0x7018, or a hang).
+  The last close now waits for genpd to report the domain off (mutex held). Stress: 50
+  rapid opens, 20 rotating-codec sessions, parallel decodes, 1080p - no errors, domain
+  off after each session.
+- GStreamer "copy" was the test: fakesink lacks GstVideoMeta support for NV12M. waylandsink
+  and glimagesink are zero-copy (1080p real-time in KWin: 0.8 s CPU per 20 s);
+  fakevideosink for benchmarks.
+- Phone: boot-v196-mfc.img + final module; s5p_mfc autoloads. Bring-up blacklists removed.
+- Note for future debugging: `pkill -f` with a pattern that also appears in the same
+  ssh command line kills that command; kill the dmesg streamer separately.
