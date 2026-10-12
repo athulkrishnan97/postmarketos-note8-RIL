@@ -1,0 +1,10 @@
+# Settings for sleepd (Android-style suspend while the screen is off)
+
+# Seconds the screen must be off before the first sleep
+#OFF_GRACE=5
+
+# Seconds to stay awake after any wakeup (modem, RTC alarm)
+#WAKE_GRACE=10
+
+# Stay awake while a USB host has the gadget configured (1/0)
+#AWAKE_ON_USB_HOST=1

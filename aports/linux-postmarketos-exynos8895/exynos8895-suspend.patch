@@ -1,0 +1,670 @@
+--- a/drivers/rtc/rtc-s5m.c
++++ b/drivers/rtc/rtc-s5m.c
+@@ -17,6 +17,7 @@
+ #include <linux/mfd/samsung/core.h>
+ #include <linux/mfd/samsung/rtc.h>
+ #include <linux/mfd/samsung/s2mps14.h>
++#include <linux/mfd/samsung/s2mps17.h>
+ 
+ /*
+  * Maximum number of retries for checking changes in UDR field
+@@ -56,7 +57,7 @@
+  * S2MPG10    | WUDR       | RUDR      | AUDR
+  * S2MPS11/14 | WUDR       | RUDR      | WUDR + RUDR
+  * S2MPS13    | WUDR       | RUDR      | WUDR + AUDR
+- * S2MPS15    | WUDR       | RUDR      | AUDR
++ * S2MPS15/17 | WUDR       | RUDR      | AUDR
+  */
+ struct s5m_rtc_reg_config {
+ 	/* Number of registers used for setting time/alarm0/alarm1 */
+@@ -159,6 +160,23 @@
+ 	.write_alarm_udr_mask	= S2MPS15_RTC_AUDR_MASK,
+ };
+ 
++/*
++ * Register map for S2MPS17 - S2MPS15 UDR bits, registers shifted by one
++ * (sub-second register before the seconds).
++ */
++static const struct s5m_rtc_reg_config s2mps17_rtc_regs = {
++	.regs_count		= 7,
++	.time			= S2MPS17_RTC_SEC,
++	.ctrl			= S2MPS17_RTC_CTRL,
++	.alarm0			= S2MPS17_RTC_A0SEC,
++	.alarm1			= S2MPS17_RTC_A1SEC,
++	.udr_update		= S2MPS17_RTC_UPDATE,
++	.autoclear_udr_mask	= S2MPS15_RTC_WUDR_MASK | S2MPS15_RTC_AUDR_MASK,
++	.read_time_udr_mask	= S2MPS_RTC_RUDR_MASK,
++	.write_time_udr_mask	= S2MPS15_RTC_WUDR_MASK,
++	.write_alarm_udr_mask	= S2MPS15_RTC_AUDR_MASK,
++};
++
+ struct s5m_rtc_info {
+ 	struct device *dev;
+ 	struct sec_pmic_dev *s5m87xx;
+@@ -184,6 +202,13 @@
+ 	.max_register = S2MPS_RTC_REG_MAX,
+ };
+ 
++static const struct regmap_config s2mps17_rtc_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++
++	.max_register = S2MPS17_RTC_REG_MAX,
++};
++
+ static void s5m8767_data_to_tm(u8 *data, struct rtc_time *tm,
+ 			       int rtc_24hr_mode)
+ {
+@@ -261,6 +286,11 @@
+ 				&val);
+ 		val &= S2MPS_ALARM0_STATUS;
+ 		break;
++	case S2MPS17X:
++		/* Only the clear-on-read interrupt register reports it. */
++		ret = 0;
++		val = 0;
++		break;
+ 	default:
+ 		return -EINVAL;
+ 	}
+@@ -302,6 +332,7 @@
+ 		udr_mask |= S5M_RTC_TIME_EN_MASK;
+ 		break;
+ 	case S2MPG10:
++	case S2MPS17X:
+ 	case S2MPS15X:
+ 	case S2MPS14X:
+ 	case S2MPS13X:
+@@ -344,6 +375,23 @@
+ 				ret);
+ 			return ret;
+ 		}
++
++		/*
++		 * S2MPS17 copies the time into the buffer registers only some
++		 * time after RUDR is set; reading early returns a stale time.
++		 */
++		if (info->device_type == S2MPS17X) {
++			unsigned int val;
++
++			ret = regmap_read_poll_timeout(info->regmap,
++					info->regs->udr_update, val,
++					!(val & info->regs->read_time_udr_mask),
++					100, 10000);
++			if (ret) {
++				dev_err(dev, "RUDR did not clear: %d\n", ret);
++				return ret;
++			}
++		}
+ 	}
+ 	ret = regmap_bulk_read(info->regmap, info->regs->time, data,
+ 			info->regs->regs_count);
+@@ -353,6 +401,7 @@
+ 	switch (info->device_type) {
+ 	case S5M8767X:
+ 	case S2MPG10:
++	case S2MPS17X:
+ 	case S2MPS15X:
+ 	case S2MPS14X:
+ 	case S2MPS13X:
+@@ -377,6 +426,7 @@
+ 	switch (info->device_type) {
+ 	case S5M8767X:
+ 	case S2MPG10:
++	case S2MPS17X:
+ 	case S2MPS15X:
+ 	case S2MPS14X:
+ 	case S2MPS13X:
+@@ -415,6 +465,7 @@
+ 	switch (info->device_type) {
+ 	case S5M8767X:
+ 	case S2MPG10:
++	case S2MPS17X:
+ 	case S2MPS15X:
+ 	case S2MPS14X:
+ 	case S2MPS13X:
+@@ -454,6 +505,7 @@
+ 	switch (info->device_type) {
+ 	case S5M8767X:
+ 	case S2MPG10:
++	case S2MPS17X:
+ 	case S2MPS15X:
+ 	case S2MPS14X:
+ 	case S2MPS13X:
+@@ -493,6 +545,7 @@
+ 	switch (info->device_type) {
+ 	case S5M8767X:
+ 	case S2MPG10:
++	case S2MPS17X:
+ 	case S2MPS15X:
+ 	case S2MPS14X:
+ 	case S2MPS13X:
+@@ -531,6 +584,7 @@
+ 	switch (info->device_type) {
+ 	case S5M8767X:
+ 	case S2MPG10:
++	case S2MPS17X:
+ 	case S2MPS15X:
+ 	case S2MPS14X:
+ 	case S2MPS13X:
+@@ -612,6 +666,7 @@
+ 		break;
+ 
+ 	case S2MPG10:
++	case S2MPS17X:
+ 	case S2MPS15X:
+ 	case S2MPS14X:
+ 	case S2MPS13X:
+@@ -677,8 +732,14 @@
+ 	if (!info->regmap) {
+ 		const struct regmap_config *regmap_cfg;
+ 		struct i2c_client *i2c;
++		u16 addr = RTC_I2C_ADDR;
+ 
+ 		switch (device_type) {
++		case S2MPS17X:
++			regmap_cfg = &s2mps17_rtc_regmap_config;
++			info->regs = &s2mps17_rtc_regs;
++			addr = S2MPS17_RTC_I2C_ADDR;
++			break;
+ 		case S2MPS15X:
+ 			regmap_cfg = &s2mps14_rtc_regmap_config;
+ 			info->regs = &s2mps15_rtc_regs;
+@@ -702,8 +763,7 @@
+ 		}
+ 
+ 		i2c = devm_i2c_new_dummy_device(&pdev->dev,
+-						s5m87xx->i2c->adapter,
+-						RTC_I2C_ADDR);
++						s5m87xx->i2c->adapter, addr);
+ 		if (IS_ERR(i2c))
+ 			return dev_err_probe(&pdev->dev, PTR_ERR(i2c),
+ 					     "Failed to allocate I2C\n");
+@@ -812,6 +872,7 @@
+ 	{ "s2mps13-rtc",	S2MPS13X },
+ 	{ "s2mps14-rtc",	S2MPS14X },
+ 	{ "s2mps15-rtc",	S2MPS15X },
++	{ "s2mps17-rtc",	S2MPS17X },
+ 	{ },
+ };
+ MODULE_DEVICE_TABLE(platform, s5m_rtc_id);
+--- a/drivers/mfd/sec-common.c
++++ b/drivers/mfd/sec-common.c
+@@ -16,6 +16,7 @@
+ #include <linux/mfd/samsung/irq.h>
+ #include <linux/mfd/samsung/s2mps11.h>
+ #include <linux/mfd/samsung/s2mps13.h>
++#include <linux/mfd/samsung/s2mps17.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/pm.h>
+@@ -91,8 +92,13 @@
+ 	MFD_CELL_OF("s2mps13-clk", NULL, NULL, 0, 0, "samsung,s2mps13-clk"),
+ };
+ 
++static const struct resource s2mps17_rtc_resources[] = {
++	DEFINE_RES_IRQ_NAMED(S2MPS17_IRQ_RTCA0, "alarm"),
++};
++
+ static const struct mfd_cell s2mps17_devs[] = {
+ 	MFD_CELL_NAME("s2mps17-regulator"),
++	MFD_CELL_RES("s2mps17-rtc", s2mps17_rtc_resources),
+ };
+ 
+ static const struct mfd_cell s2mpa01_devs[] = {
+--- a/drivers/mfd/sec-irq.c
++++ b/drivers/mfd/sec-irq.c
+@@ -474,6 +474,15 @@
+ 		break;
+ 	case S2MPS17X:
+ 		sec_irq_chip = &s2mps17_irq_chip;
++		/*
++		 * regmap-irq only touches the mask bits of the interrupts it
++		 * knows about; the rest power up unmasked and raise the line
++		 * (waking the system) for events nobody handles. Mask them
++		 * all, as the vendor driver does.
++		 */
++		for (int i = 0; i < s2mps17_irq_chip.num_regs; i++)
++			regmap_write(sec_pmic->regmap_pmic,
++				     S2MPS17_REG_INT1M + i, 0xff);
+ 		break;
+ 	case S2MPU02:
+ 		sec_irq_chip = &s2mpu02_irq_chip;
+--- a/include/linux/mfd/samsung/s2mps17.h
++++ b/include/linux/mfd/samsung/s2mps17.h
+@@ -70,6 +70,22 @@
+ #define S2MPS17_ENABLE_SHIFT		6
+ #define S2MPS17_ENABLE_MASK		(0x03 << S2MPS17_ENABLE_SHIFT)
+ 
++/*
++ * RTC page (slave address 0x02). Same layout as S2MPS15 shifted by one: a
++ * sub-second register sits in front of the seconds. Binary, not BCD.
++ * UPDATE: bit0 RUDR, bit1 WUDR (time), bit4 AUDR (alarm); WUDR/AUDR
++ * auto-clear.
++ */
++#define S2MPS17_RTC_I2C_ADDR		0x02
++#define S2MPS17_RTC_CTRL		0x00
++#define S2MPS17_RTC_WTSR_SMPL		0x01
++#define S2MPS17_RTC_UPDATE		0x02
++#define S2MPS17_RTC_MSEC		0x04
++#define S2MPS17_RTC_SEC			0x05
++#define S2MPS17_RTC_A0SEC		0x0C
++#define S2MPS17_RTC_A1SEC		0x13
++#define S2MPS17_RTC_REG_MAX		0x1F
++
+ enum s2mps17_regulators {
+ 	S2MPS17_BUCK1,
+ 	S2MPS17_BUCK2,
+--- a/drivers/iio/adc/exynos_adc.c
++++ b/drivers/iio/adc/exynos_adc.c
+@@ -132,6 +132,7 @@
+ 	bool needs_sclk;
+ 	bool needs_adc_phy;
+ 	bool data_v3;
++	bool cp_shared;
+ 	int phy_offset;
+ 	u32 mask;
+ 
+@@ -421,6 +422,12 @@
+ 	.num_channels	= MAX_ADC_V3_CHANNELS,
+ 	.mask		= ADC_DATX_MASK, /* 12 bit ADC resolution */
+ 	.data_v3	= true,
++	/*
++	 * The modem (CP) samples its own channels on this ADC. Gating the
++	 * interface clock or resetting the block under it crashes the CP,
++	 * so leave it running across system sleep.
++	 */
++	.cp_shared	= true,
+ 
+ 	.init_hw	= exynos_adc_v3_init_hw,
+ 	.exit_hw	= exynos_adc_v2_exit_hw,
+@@ -712,6 +719,9 @@
+ 	struct iio_dev *indio_dev = dev_get_drvdata(dev);
+ 	struct exynos_adc *info = iio_priv(indio_dev);
+ 
++	if (info->data->cp_shared)
++		return 0;
++
+ 	if (info->data->exit_hw)
+ 		info->data->exit_hw(info);
+ 	exynos_adc_disable_clk(info);
+@@ -726,6 +736,9 @@
+ 	struct exynos_adc *info = iio_priv(indio_dev);
+ 	int ret;
+ 
++	if (info->data->cp_shared)
++		return 0;
++
+ 	ret = regulator_enable(info->vdd);
+ 	if (ret)
+ 		return ret;
+--- a/drivers/clk/samsung/clk-exynos-arm64.c
++++ b/drivers/clk/samsung/clk-exynos-arm64.c
+@@ -12,6 +12,7 @@
+ #include <linux/of_address.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
++#include <linux/pm_domain.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/slab.h>
+ 
+@@ -55,6 +56,9 @@
+ 	int nr_pclks;
+ 
+ 	struct samsung_clk_provider *ctx;
++
++	struct device *dev;
++	struct notifier_block genpd_nb;
+ };
+ 
+ /* Check if the register offset is a GATE register */
+@@ -272,6 +276,9 @@
+  *
+  * Return: 0 on success, or negative error code on error.
+  */
++static int exynos_arm64_cmu_genpd_notify(struct notifier_block *nb,
++					 unsigned long action, void *unused);
++
+ int __init exynos_arm64_register_cmu_pm(struct platform_device *pdev,
+ 					bool init_clk_regs)
+ {
+@@ -328,6 +335,10 @@
+ 	samsung_en_dyn_root_clk_gating(np, data->ctx, cmu, true);
+ 	pm_runtime_put_sync(dev);
+ 
++	data->dev = dev;
++	data->genpd_nb.notifier_call = exynos_arm64_cmu_genpd_notify;
++	dev_pm_genpd_add_notifier(dev, &data->genpd_nb);
++
+ 	return 0;
+ }
+ 
+@@ -380,3 +391,25 @@
+ 
+ 	return 0;
+ }
++
++/*
++ * During system resume genpd powers a domain back on without resuming a
++ * runtime-suspended CMU in it, so the CMU registers come up at their reset
++ * values. Some of them (Q-channel controls) must hold their saved values for
++ * the next power-down of the domain to complete; restore the context here.
++ */
++static int exynos_arm64_cmu_genpd_notify(struct notifier_block *nb,
++					 unsigned long action, void *unused)
++{
++	struct exynos_arm64_cmu_data *data =
++		container_of(nb, struct exynos_arm64_cmu_data, genpd_nb);
++
++	if (action != GENPD_NOTIFY_ON ||
++	    !pm_runtime_status_suspended(data->dev))
++		return NOTIFY_OK;
++
++	exynos_arm64_cmu_resume(data->dev);
++	clk_disable_unprepare(data->clk);
++
++	return NOTIFY_OK;
++}
+--- a/drivers/misc/modem_v1/mcu_ipc.h
++++ b/drivers/misc/modem_v1/mcu_ipc.h
+@@ -33,6 +33,7 @@
+ 	u32 id;
+ 
+ 	void __iomem *ioaddr;
++	int irq;
+ 	u32 registered_irq;
+ 	unsigned long unmasked_irq;
+ 
+--- a/drivers/misc/modem_v1/mcu_ipc.c
++++ b/drivers/misc/modem_v1/mcu_ipc.c
+@@ -426,6 +426,15 @@
+ 
+ 	mcu_ipc_clear_all_interrupt(id);
+ 
++	/*
++	 * The CP signals calls, SMS and incoming packets through the mailbox:
++	 * let it wake the system (it only does so sparingly once it has been
++	 * told the AP sleeps, see modem_suspend()).
++	 */
++	mcu_dat[id].irq = mcu_ipc_irq;
++	platform_set_drvdata(pdev, &mcu_dat[id]);
++	device_init_wakeup(dev, true);
++
+ 	/* set argos irq affinity */
+ 	err = mcu_ipc_set_affinity(id, dev, mcu_ipc_irq);
+ 	if (err)
+@@ -447,13 +456,19 @@
+ #ifdef CONFIG_PM
+ static int mcu_ipc_suspend(struct device *dev)
+ {
+-	/* TODO */
++	struct mcu_ipc_drv_data *data = dev_get_drvdata(dev);
++
++	if (device_may_wakeup(dev))
++		enable_irq_wake(data->irq);
+ 	return 0;
+ }
+ 
+ static int mcu_ipc_resume(struct device *dev)
+ {
+-	/* TODO */
++	struct mcu_ipc_drv_data *data = dev_get_drvdata(dev);
++
++	if (device_may_wakeup(dev))
++		disable_irq_wake(data->irq);
+ 	return 0;
+ }
+ #else
+--- a/drivers/pci/controller/dwc/pci-exynos.c
++++ b/drivers/pci/controller/dwc/pci-exynos.c
+@@ -85,6 +85,7 @@
+ 	struct gpio_desc		*perst_gpio;
+ 	struct gpio_desc		*wlan_en_gpio;
+ 	const struct exynos_pcie_soc_data *soc;
++	bool				cfg0_released;
+ };
+ 
+ struct exynos_pcie_soc_data {
+@@ -342,10 +343,11 @@
+ 	 * it here - still before pci_host_probe() - and let the BARs
+ 	 * span the whole window.
+ 	 */
+-	if (pp->cfg0_size) {
++	if (pp->cfg0_size && !ep->cfg0_released) {
+ 		dev_info(pci->dev, "DBG: releasing cfg0 reservation at %pa\n",
+ 			 &pp->cfg0_base);
+ 		release_mem_region(pp->cfg0_base, pp->cfg0_size);
++		ep->cfg0_released = true;
+ 	}
+ 
+ 	/*
+@@ -421,6 +423,11 @@
+ 	dev_info(ep->pci.dev, "DBG: H irq pulse\n");
+ 	exynos_pcie_writel(pci->elbi_base, 0xf, PCIE_8895_ELBI_IRQ_EN_PULSE);
+ 
++	iounmap(pmu);
++	iounmap(sysreg);
++	iounmap(pcs);
++	iounmap(phy);
++
+ 	dev_info(ep->pci.dev, "DBG: host_init done (perst held)\n");
+ 	return 0;
+ }
+@@ -763,7 +770,7 @@
+ 	/* pp->ops->init controls ep->phy */
+ 	pp->ops->init(pp);
+ 	dw_pcie_setup_rc(pp);
+-	exynos_pcie_start_link(pci);
++	pci->ops->start_link(pci);
+ 	return dw_pcie_wait_for_link(pci);
+ }
+ 
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+@@ -350,6 +350,7 @@
+ 	struct brcmf_pcie_shared_info shared;
+ 	wait_queue_head_t mbdata_resp_wait;
+ 	bool mbdata_completed;
++	bool d3_noack;
+ 	bool irq_allocated;
+ 	bool wowl_enabled;
+ 	u8 dma_idx_sz;
+@@ -797,6 +798,11 @@
+ 	if (core->rev <= 13)
+ 		pci_write_config_dword(devinfo->pdev, BRCMF_PCIE_REG_SBMBX, 1);
+ 
++	/* rev >= 64 dongles take mailbox data on H2D doorbell 1 (as bcmdhd) */
++	if (core->rev >= 64)
++		brcmf_pcie_write_reg32(devinfo, devinfo->reginfo->h2d_mailbox_1,
++				       0x12345678);
++
+ 	return 0;
+ }
+ 
+@@ -2658,6 +2664,7 @@
+ {
+ 	struct brcmf_pciedev_info *devinfo;
+ 	struct brcmf_bus *bus;
++	unsigned long timeout;
+ 
+ 	brcmf_dbg(PCIE, "Enter\n");
+ 
+@@ -2668,14 +2675,36 @@
+ 	brcmf_bus_change_state(bus, BRCMF_BUS_DOWN);
+ 
+ 	devinfo->mbdata_completed = false;
++	devinfo->d3_noack = false;
+ 	brcmf_pcie_send_mb_data(devinfo, BRCMF_H2D_HOST_D3_INFORM);
+ 
+-	wait_event_timeout(devinfo->mbdata_resp_wait, devinfo->mbdata_completed,
+-			   BRCMF_PCIE_MBDATA_TIMEOUT);
++	/*
++	 * Cores rev >= 64 have no FN0 mailbox interrupt (int_fn0 is 0), so
++	 * the D3 ACK is never seen from the ISR: poll the D2H mailbox too.
++	 */
++	timeout = jiffies + BRCMF_PCIE_MBDATA_TIMEOUT;
++	while (!devinfo->mbdata_completed && time_before(jiffies, timeout)) {
++		if (!devinfo->reginfo->int_fn0)
++			brcmf_pcie_handle_mb_data(devinfo);
++		wait_event_timeout(devinfo->mbdata_resp_wait,
++				   devinfo->mbdata_completed,
++				   msecs_to_jiffies(10));
++	}
+ 	if (!devinfo->mbdata_completed) {
+-		brcmf_err(bus, "Timeout on response for entering D3 substate\n");
+-		brcmf_bus_change_state(bus, BRCMF_BUS_UP);
+-		return -EIO;
++		/*
++		 * Don't block system suspend on a dongle that never acks:
++		 * stop it and bring it up from scratch on resume.
++		 */
++		brcmf_err(bus, "No D3 ACK (htod_mb 0x%x dtoh_mb 0x%x mbint 0x%x flags 0x%x), reinit on resume\n",
++			  brcmf_pcie_read_tcm32(devinfo,
++						devinfo->shared.htod_mb_data_addr),
++			  brcmf_pcie_read_tcm32(devinfo,
++						devinfo->shared.dtoh_mb_data_addr),
++			  brcmf_pcie_read_reg32(devinfo,
++						devinfo->reginfo->mailboxint),
++			  devinfo->shared.flags);
++		brcmf_pcie_intr_disable(devinfo);
++		devinfo->d3_noack = true;
+ 	}
+ 
+ 	devinfo->state = BRCMFMAC_PCIE_STATE_DOWN;
+@@ -2697,6 +2726,11 @@
+ 	devinfo = bus->bus_priv.pcie->devinfo;
+ 	brcmf_dbg(PCIE, "Enter, dev=%p, bus=%p\n", dev, bus);
+ 
++	if (devinfo->d3_noack) {
++		devinfo->d3_noack = false;
++		goto cleanup;
++	}
++
+ 	/* Check if device is still up and running, if so we are ready */
+ 	if (brcmf_pcie_read_reg32(devinfo, devinfo->reginfo->intmask) != 0) {
+ 		brcmf_dbg(PCIE, "Try to wakeup device....\n");
+--- a/drivers/power/supply/max77865_charger.c
++++ b/drivers/power/supply/max77865_charger.c
+@@ -29,6 +29,7 @@
+ #define MAX77865_CHG_DTLS_WDT_EXPIRED	0xb
+ #define MAX77865_CHG_CNFG_00		0xb7
+ #define MAX77865_CHG_MODE_CHG		BIT(0)
++#define MAX77865_WDTEN			BIT(4)
+ #define MAX77865_CHG_CNFG_06		0xbd
+ #define MAX77865_CHGPROT_UNLOCK		GENMASK(3, 2)
+ #define MAX77865_WDTCLR			BIT(0)
+@@ -182,15 +183,32 @@
+ 	return 0;
+ }
+ 
++/*
++ * Nothing kicks the watchdog while the system sleeps, so switch it off
++ * for that time; otherwise charging stops ~80 s into suspend.
++ */
++static int max77865_charger_suspend(struct device *dev)
++{
++	struct max77865_charger *chg = dev_get_drvdata(dev);
++
++	cancel_delayed_work_sync(&chg->work);
++	max77865_charger_kick(chg);
++	return regmap_update_bits(chg->regmap, MAX77865_CHG_CNFG_00,
++				  MAX77865_WDTEN, 0);
++}
++
+ static int max77865_charger_resume(struct device *dev)
+ {
+ 	struct max77865_charger *chg = dev_get_drvdata(dev);
+ 
++	max77865_charger_kick(chg);
++	regmap_update_bits(chg->regmap, MAX77865_CHG_CNFG_00,
++			   MAX77865_WDTEN, MAX77865_WDTEN);
+ 	mod_delayed_work(system_wq, &chg->work, 0);
+ 	return 0;
+ }
+ 
+-static DEFINE_SIMPLE_DEV_PM_OPS(max77865_charger_pm, NULL,
++static DEFINE_SIMPLE_DEV_PM_OPS(max77865_charger_pm, max77865_charger_suspend,
+ 				max77865_charger_resume);
+ 
+ static const struct of_device_id max77865_charger_of_match[] = {
+--- a/drivers/input/touchscreen/s6sy761.c
++++ b/drivers/input/touchscreen/s6sy761.c
+@@ -519,10 +519,20 @@
+ static int s6sy761_resume(struct device *dev)
+ {
+ 	struct s6sy761_data *sdata = dev_get_drvdata(dev);
++	int ret;
++
++	/*
++	 * Power up before unmasking: the line asserts while the controller
++	 * boots and the handler would race the boot event wait. Sensing is
++	 * off after a power cycle, turn it back on for an open device.
++	 */
++	ret = s6sy761_power_on(sdata);
++	if (!ret && input_device_enabled(sdata->input))
++		ret = i2c_smbus_write_byte(sdata->client, S6SY761_SENSE_ON);
+ 
+ 	enable_irq(sdata->client->irq);
+ 
+-	return s6sy761_power_on(sdata);
++	return ret;
+ }
+ 
+ static const struct dev_pm_ops s6sy761_pm_ops = {
+--- a/sound/soc/samsung/abox/abox.c
++++ b/sound/soc/samsung/abox/abox.c
+@@ -23,6 +23,7 @@
+ #include <linux/mfd/syscon.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
++#include <linux/of_platform.h>
+ #include <linux/of_reserved_mem.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_runtime.h>
+@@ -735,6 +736,29 @@
+ };
+ ATTRIBUTE_GROUPS(abox);
+ 
++/*
++ * The A7 keeps running across system sleep: it hosts the CP's voice firmware
++ * (VSS), and the CP declares a crash as soon as VSS loses its memory. Keep
++ * the ABOX and its SysMMU (and so their power domain) out of the system
++ * suspend sequence; the ABOX is runtime-active for as long as it is bound.
++ */
++static void abox_set_syscore(struct device *dev, bool on)
++{
++	struct of_phandle_args args;
++	struct platform_device *mmu;
++
++	dev_pm_syscore_device(dev, on);
++	if (of_parse_phandle_with_args(dev->of_node, "iommus", "#iommu-cells",
++				       0, &args))
++		return;
++	mmu = of_find_device_by_node(args.np);
++	of_node_put(args.np);
++	if (!mmu)
++		return;
++	dev_pm_syscore_device(&mmu->dev, on);
++	put_device(&mmu->dev);
++}
++
+ static void abox_teardown(void *arg)
+ {
+ 	struct abox_data *data = arg;
+@@ -747,6 +771,7 @@
+ 	abox_cpu_power(data, false);
+ 	iommu_detach_device(data->domain, data->dev);
+ 	iommu_domain_free(data->domain);
++	abox_set_syscore(data->dev, false);
+ 	pm_runtime_put(data->dev);
+ }
+ 
+@@ -829,6 +854,8 @@
+ 	if (ret)
+ 		return ret;
+ 
++	abox_set_syscore(dev, true);
++
+ 	irq = platform_get_irq(pdev, 0);
+ 	if (irq < 0)
+ 		return irq;

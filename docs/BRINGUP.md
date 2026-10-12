@@ -949,6 +949,20 @@ leftover from section 17, where it changed nothing); removed.
     retry loop (CGDCONT every 10 s) can starve the AT+CGATT=1 it should send;
     a modem-ipc restart recovers. A mode set right before a reboot may not
     reach the CP's NV.
+[x] Android-style sleep (s2idle + power-key/modem/RTC wake + sleepd), see
+    the Sleep section. Still open:
+    [ ] verify wake on an incoming call and SMS, and the drain per hour
+        unplugged (screen off);
+    [ ] screen auto-off is disabled in the user's PowerDevil config and its
+        15-min auto-suspend goes through logind (drops mobile data): set
+        "turn off screen after" and disable PowerDevil auto-suspend;
+    [ ] brcmfmac never gets the D3 ACK: Wi-Fi reloads its firmware on every
+        resume (Wi-Fi was disabled while testing, connected case untested);
+    [ ] "unbalanced disables for vdd_1p2_codec" once per resume from
+        madera_runtime_suspend (some path disables DCVDD twice; harmless,
+        the regulator just stays off);
+    [ ] CP still raises ~6 mailbox IRQs/min while told the AP sleeps (data
+        link state notifications); each is a wakeup.
 [x] Browser start-up freeze: firmware-owned RAM was not reserved (section 17).
 [ ] Consider re-pairing resilience: a tiny phone-side script for
     discoverable/agent state if bonds break again.
@@ -1257,3 +1271,44 @@ ffmpeg (Alpine) does not do (Raspberry Pi's fork does).
 Boot images: v196 (Image from the patch as committed; MFC nodes + IOVA
 reservation merged into the v186 dtb with `tools/mfc/mfc_dtb_merge.py` and
 `mfc_iova_dt.py`).
+
+## Sleep: s2idle with power-key, modem and RTC wake (kernel 7.0-r16)
+
+Only s2idle exists (`/sys/power/mem_sleep` = `[s2idle]`): CPUs idle in WFI,
+devices suspended, nothing powered down by firmware. `exynos8895-suspend.patch`
+makes it work end to end; `tools/sleepd` provides the Android-style policy.
+
+What blocked suspend, in the order it was found:
+
+| Problem | Cause | Fix |
+|---|---|---|
+| No RTC (no `/dev/rtc0`, no timed wakes) | S2MPS17 RTC not supported | rtc-s5m S2MPS17 variant: RTC page at SPEEDY address 0x02, S2MPS15 layout shifted by one (sub-second register at 0x04, seconds at 0x05, alarm0 0x0c, alarm1 0x13), binary, UDR bits RUDR 0x01 / WUDR 0x02 / AUDR 0x10 (found by poking the registers); mfd cell with the RTCA0 IRQ. Built in, so `hctosys` sets the clock at boot |
+| Suspend aborted (-EIO) | brcmfmac never gets the D3 ACK from the BCM4361 (H2D mailbox data stays unread; rev >= 64 cores have no FN0 mailbox interrupt) | poll the D2H mailbox, ring DB1 as bcmdhd does, and when no ACK comes, stop the dongle and re-probe it on resume (the RC powers Wi-Fi off in suspend anyway) |
+| Wi-Fi gone after resume ("Device not found") | `exynos_pcie_resume_noirq()` called the Exynos5433 start_link, which never releases PERST | call `pci->ops->start_link`; release the cfg0 reservation only once; unmap the PHY/PMU windows |
+| CP crash (CP_CRASH_EXIT) at every suspend, 1-170 ms after `modem_suspend()` | the modem samples its own channels on the shared ADC at 0x15b70000; mainline's ADC suspend gates its interface clock (and resume soft-resets it). Found by bisecting device suspend with `pm_test=devices` and a debug module that marks devices syscore | Exynos 8895 ADC: no system-sleep handling (`cp_shared`) |
+| (on the way) CP crash risk from the ABOX | system suspend turned off the ABOX SysMMU while the A7 runs the CP's VSS | ABOX and its SysMMU are syscore devices (stay up, keep their power domain on) |
+| Wakes at random times (4 s, 60 s for a 20 s alarm) | regmap-irq only masks bits of IRQs it knows; the S2MPS17's other sources (INT2 bit 7, INT3 bits 4-7, all of INT4-6) powered up unmasked | mask all PMIC interrupt sources before adding the irq chip |
+| MFC domain "disable failed (status 0x9000f)" after resume, stays on | genpd powers the domain on in resume_noirq without resuming the runtime-suspended CMU_MFC, so its Q-channel registers come up at reset values | genpd power-on notifier in the Exynos CMU code restores the saved CMU context |
+| Charging would stop in sleep | nothing kicks the MAX77865 charger watchdog | watchdog off (CNFG_00 WDTEN) across suspend |
+| Touch after resume | IRQ unmasked before the controller is powered; sensing off after the power cycle | power on first, re-enable sensing for an open device |
+| No wake for calls/SMS | mailbox IRQ not a wakeup source | `mcu_ipc` arms its IRQ with `enable_irq_wake()` |
+
+Verified (USB-connected phone, so no drain numbers yet): repeated 20-30 s RTC
+cycles wake on time, no CP crash, LTE data works straight after resume, MFC
+domain powers off. With `sleepd` and the screen off, the modem woke the phone
+three times in the first minute after screen-off (data link winding down),
+then it slept 201 s until the test RTC alarm.
+
+Policy (`tools/sleepd`, OpenRC service, enabled): with the screen off (DRM
+connector DPMS Off) for 5 s it writes `freeze` to `/sys/power/state` (with the
+`wakeup_count` handshake), and after any wakeup it waits 10 s before sleeping
+again. It does not go through logind on purpose: NetworkManager and
+ModemManager hold logind delay inhibitors and take mobile data down for every
+logind sleep. Stays awake for audio playback, a call, a logind sleep block
+inhibitor, an SSH session, a configured USB host connection (development;
+`AWAKE_ON_USB_HOST=0` in `/etc/conf.d/sleepd` to sleep anyway) or
+`/run/sleepd.disable`. Log: `/var/log/sleepd.log` (wake IRQ 58 = PMIC/RTC,
+48 = modem mailbox, 83 = power key).
+
+Debug knobs now built in: `CONFIG_PM_DEBUG`/`PM_SLEEP_DEBUG`
+(`/sys/power/pm_test`, `pm_print_times`, `pm_wakeup_irq`).

@@ -26,10 +26,10 @@
  #include <linux/module.h>
  #include <linux/of.h>
 +#include <linux/of_address.h>
+ #include <linux/of_platform.h>
  #include <linux/of_reserved_mem.h>
  #include <linux/platform_device.h>
- #include <linux/pm_runtime.h>
-@@ -255,6 +256,10 @@
+@@ -256,6 +257,10 @@
  	return NULL;
  }
  
@@ -40,7 +40,7 @@
  static void abox_log_flush(struct abox_data *data)
  {
  	struct abox_log_buffer *log = data->log;
-@@ -281,7 +286,9 @@
+@@ -282,7 +287,9 @@
  			line[n++] = c;
  		}
  		line[n] = '\0';
@@ -51,7 +51,7 @@
  			dev_dbg(data->dev, "fw: %s\n", line);
  	}
  	WRITE_ONCE(log->index_reader, r);
-@@ -303,6 +310,15 @@
+@@ -304,6 +311,15 @@
   * the new rate to be confirmed. Requests are tracked per requester id and
   * the fastest one wins.
   */
@@ -67,7 +67,7 @@
  static void abox_change_gear(struct abox_data *data, u32 gear, u32 id)
  {
  	struct abox_ipc_msg msg = {
-@@ -328,7 +344,7 @@
+@@ -329,7 +345,7 @@
  		if (data->gear_req[i].id && data->gear_req[i].gear &&
  		    data->gear_req[i].gear < best)
  			best = data->gear_req[i].gear;
@@ -76,7 +76,7 @@
  
  	writel(best - 1, data->cmu + CMU_DIV_CLK_ABOX_PLL);
  	rate = AUD_PLL_RATE_HZ / best;
-@@ -495,12 +511,52 @@
+@@ -496,12 +512,52 @@
  	return ret;
  }
  
@@ -129,7 +129,7 @@
  	int ret;
  
  	ret = of_reserved_mem_region_to_resource(dev->of_node, 0, &res);
-@@ -567,13 +623,23 @@
+@@ -568,13 +624,23 @@
  		ret = abox_map(data, CHIPID_BASE, data->scratch_phys, SZ_4K,
  			       IOMMU_READ);
  	/*
@@ -159,7 +159,7 @@
  	     iova += SZ_4K)
  		ret = abox_map(data, iova, data->scratch_phys + SZ_4K, SZ_4K,
  			       prot);
-@@ -626,6 +692,35 @@
+@@ -627,6 +693,35 @@
  	return 0;
  }
  
@@ -195,7 +195,7 @@
  int abox_boot(struct abox_data *data)
  {
  	struct device *dev = data->dev;
-@@ -716,6 +811,8 @@
+@@ -717,6 +812,8 @@
  	}
  	if (ret)
  		dev_warn(dev, "resume IPC failed: %d\n", ret);
@@ -204,7 +204,7 @@
  	goto out;
  
  fail:
-@@ -750,12 +847,46 @@
+@@ -751,12 +848,46 @@
  }
  
  

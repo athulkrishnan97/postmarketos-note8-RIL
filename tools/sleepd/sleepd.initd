@@ -1,0 +1,14 @@
+#!/sbin/openrc-run
+
+description="Android-style suspend while the screen is off"
+command=/usr/local/sbin/sleepd
+command_background=true
+pidfile=/run/sleepd.pid
+
+start_pre() {
+	export OFF_GRACE WAKE_GRACE AWAKE_ON_USB_HOST
+}
+
+depend() {
+	after elogind modemmanager
+}

@@ -1,0 +1,92 @@
+#!/bin/sh
+# sleepd - Android-style sleep for the Galaxy Note 8 (greatlte).
+#
+# Puts the system into s2idle whenever the screen is off and nothing needs
+# the CPU, and goes back to sleep shortly after any wakeup (modem, RTC alarm)
+# that did not turn the screen on. The kernel side provides the wakeups:
+# power key, modem mailbox (calls, SMS, incoming data) and RTC alarms.
+#
+# Suspend is entered directly through /sys/power/state, not logind: going
+# through logind would make NetworkManager/ModemManager tear down mobile data
+# on every sleep.
+#
+# Stays awake while: the screen is on, audio is playing, a call exists,
+# a logind "sleep" block inhibitor is held, an SSH session is open, a USB
+# host has the gadget configured (AWAKE_ON_USB_HOST=1, like Android's "stay
+# awake while charging" developer option; a plain charger does not count),
+# or /run/sleepd.disable exists. Settings: /etc/conf.d/sleepd.
+
+OFF_GRACE=${OFF_GRACE:-5}	# s with the screen off before sleeping
+WAKE_GRACE=${WAKE_GRACE:-10}	# s to stay up after a wakeup
+CONNECTOR=${CONNECTOR:-/sys/class/drm/card0-DSI-1/dpms}
+AWAKE_ON_USB_HOST=${AWAKE_ON_USB_HOST:-1}
+LOG=/var/log/sleepd.log
+
+log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+now() { cut -d. -f1 /proc/uptime; }
+
+screen_on() { [ "$(cat "$CONNECTOR" 2>/dev/null)" = On ]; }
+audio_busy() { grep -qs RUNNING /proc/asound/card*/pcm*/sub*/status; }
+usb_host() {
+	[ "$AWAKE_ON_USB_HOST" = 1 ] && grep -qs '^configured' /sys/class/udc/*/state
+}
+ssh_active() { [ -n "$(ss -Htn state established '( sport = :22 )' 2>/dev/null)" ]; }
+call_active() {
+	mmcli -m any --voice-list-calls 2>/dev/null | grep -q '/Call/'
+}
+inhibited() {
+	busctl --system call org.freedesktop.login1 /org/freedesktop/login1 \
+		org.freedesktop.login1.Manager ListInhibitors 2>/dev/null |
+		grep -Eq '"[^"]*sleep[^"]*" "[^"]*" "[^"]*" "block"'
+}
+
+why_awake() {
+	[ -e /run/sleepd.disable ] && { echo disabled; return; }
+	audio_busy && { echo audio; return; }
+	ssh_active && { echo ssh; return; }
+	usb_host && { echo usb-host; return; }
+	inhibited && { echo inhibitor; return; }
+	call_active && { echo call; return; }
+	echo ""
+}
+
+log "started (off grace ${OFF_GRACE}s, wake grace ${WAKE_GRACE}s)"
+off_since=
+last_wake=$(now)
+last_reason=
+while :; do
+	if screen_on; then
+		off_since=
+		sleep 2
+		continue
+	fi
+	t=$(now)
+	[ -z "$off_since" ] && off_since=$t
+	if [ $((t - off_since)) -lt "$OFF_GRACE" ] ||
+	   [ $((t - last_wake)) -lt "$WAKE_GRACE" ]; then
+		sleep 1
+		continue
+	fi
+	reason=$(why_awake)
+	if [ -n "$reason" ]; then
+		[ "$reason" != "$last_reason" ] && log "staying awake: $reason"
+		last_reason=$reason
+		sleep 3
+		continue
+	fi
+	last_reason=
+	# wakeup_count handshake: abort if a wakeup event arrived meanwhile
+	wc=$(cat /sys/power/wakeup_count)
+	if ! echo "$wc" > /sys/power/wakeup_count 2>/dev/null; then
+		sleep 1
+		continue
+	fi
+	t0=$(date +%s)
+	if echo freeze > /sys/power/state 2>/dev/null; then
+		log "slept $(( $(date +%s) - t0 ))s, woken by irq $(cat /sys/power/pm_wakeup_irq 2>/dev/null)"
+	else
+		log "suspend failed"
+		sleep 5
+	fi
+	last_wake=$(now)
+done

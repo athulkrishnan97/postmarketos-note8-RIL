@@ -1000,3 +1000,26 @@ the work below was done offline.)
 - Phone heat was Spectacle's autostarted daemon spinning (also my test streams
   and an inhibitor during testing). Spectacle autostart hidden for the user.
 - Idle after restore: load ~1.4 falling, 50 C.
+
+## 2026-10-12 ~21:15 ANDROID-STYLE SLEEP WORKS (v201 FLASHED)
+- Phone runs boot-v201-mdmwake.img (laptop work/) = laptop tree linux-7.0-ril #15:
+  everything in aports exynos8895-suspend.patch (verified: the full pkgrel-16
+  patch series applies to the 028ef9c tarball and gives byte-identical files).
+  Also on the phone: brcmfmac.ko and pci-exynos.ko from that tree (backup
+  /root/pci-exynos.ko.zst.orig), ABOX module = WIP VSS module + syscore change
+  (previous one: /root/snd-soc-samsung-abox.ko.vss-1650).
+- sleepd installed and enabled (OpenRC default). It keeps the phone awake while
+  the laptop's USB host link is configured; unplug (or AWAKE_ON_USB_HOST=0 in
+  /etc/conf.d/sleepd) to let it sleep. touch /run/sleepd.disable to hold it.
+- Found by bisecting device suspend (pm_test=devices + a debug module that marks
+  devices syscore, laptop work/pmskip): the CP crashes when the shared ADC's
+  clock is gated. Bisecting group "everything on i2c/speedy/cmu/pinctrl" at once
+  froze the phone (parents suspended under awake children); the module now
+  selects whole subtrees.
+- Mistake on the way: devmem tool was run as "devmem addr 32" (it takes
+  addr [value]) and wrote 0x20 into five mailbox registers; a modem-ipc
+  restart re-initialised them. Earlier, an image was packaged from the stale
+  ~/postmarketos/uniLoader dir (overwrote its blob/Image and work/ulpkg/boot/
+  bootshim, both unused since Oct 2/10); that image was deleted unflashed.
+- Open: user test of call/SMS wake and unplugged drain; PowerDevil screen-off
+  (disabled by the user's config) and its logind auto-suspend; see BRINGUP TODO.
