@@ -273,7 +273,7 @@ ModemManager then believed the modem had no IP support.
   dialing -> active, the CP reports outgoing -> alerting -> connected, hang-up
   releases it.
 - Not working: the CP crashes (CP_CRASH_EXIT, cbd restarts it) ~20 s into a
-  connected call. The modem driver clears the "VSS magic code" as it goes: the
+  connected call (work in progress: tools/modem/wip/). The modem driver clears the "VSS magic code" as it goes: the
   voice firmware (VSS) runs on the ABOX, in a window the ABOX driver currently
   backs with a dummy page (exynos8895-audio-vss.patch). Calls need the real VSS
   memory mapped there, plus the call audio routing and microphones.

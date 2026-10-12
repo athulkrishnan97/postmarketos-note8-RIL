@@ -57,6 +57,7 @@
  * Build on the phone: gcc -O2 -Wall -o mifmon mifmon.c
  */
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -69,6 +70,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -1217,6 +1219,39 @@ static int call_at(const char *cmd)
 	return 1;
 }
 
+/*
+ * The CP's voice firmware (VSS) runs on the audio DSP (ABOX). cbd loads it
+ * before starting the CP; at every CP power-up the ABOX driver is asked to
+ * start it (its start_vss attribute, which boots the DSP first if needed).
+ * Without it the CP crashes a few seconds into a call. In a child: booting
+ * the DSP takes a while and the CP's start-up file requests cannot wait.
+ */
+static void vss_start(void)
+{
+	const char *dir = "/sys/bus/platform/drivers/samsung-abox";
+	char path[512];
+	struct dirent *e;
+	DIR *d;
+	int fd;
+
+	if (fork() != 0)
+		return;
+	d = opendir(dir);
+	while (d && (e = readdir(d))) {
+		snprintf(path, sizeof(path), "%s/%s/start_vss", dir, e->d_name);
+		fd = open(path, O_WRONLY);
+		if (fd < 0)
+			continue;
+		if (write(fd, "1", 1) < 0)
+			perror("mifmon: start_vss");
+		else
+			printf("VSS start requested\n");
+		close(fd);
+	}
+	fflush(stdout);
+	_exit(0);
+}
+
 static void dc_mm_cgact(int on, unsigned int cid);
 static void dc_mm_status(char *out, size_t len);
 static int dc_mm_contrdp(char *out, size_t len);
@@ -1846,7 +1881,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "mifmon: cid must be 1..8\n");
 		return 2;
 	}
-	signal(SIGCHLD, SIG_IGN);	/* hook processes */
+	signal(SIGCHLD, SIG_IGN);	/* hook and vss_start() processes */
 	setvbuf(stdout, NULL, _IOLBF, 0);
 
 	pfd[0].fd = open_dev("/dev/umts_ipc0");
@@ -1947,6 +1982,8 @@ int main(int argc, char **argv)
 				show_fmt("rx", buf, n);
 				if (n >= 7 && buf[4] == 0x04 && buf[5] == 0x02)
 					sms_incoming(buf, n);
+				if (n >= 7 && buf[4] == 0x01 && buf[5] == 0x01)
+					vss_start();	/* PWR_PHONE_PWR_UP */
 				rat_rx(buf, n);
 				call_rx(buf, n);
 				if (data)

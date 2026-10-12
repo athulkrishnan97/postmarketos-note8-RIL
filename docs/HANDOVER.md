@@ -971,3 +971,11 @@ the work below was done offline.)
   running (ABOX VSS window is the dummy page). Next: map the modem's VSS memory into
   the ABOX IOMMU window at 0xa0000000 and boot VSS like downstream.
 - Network mode left at 2g|3g|4g (LTE) after the tests.
+
+## 2026-10-12 ~16:30 VSS EXPERIMENT (NOT MERGED); PHONE REBOOTED
+- ABOX module with the real VSS memory mapped (0xfc600000, 6 MiB) + ABOX_START_VSS at CP
+  power-up (tools/modem/wip/): the firmware stopped answering IPCs after START_VSS and
+  the CP still crashed 20 s into a call. A module reload left the ABOX without boot-done;
+  rebooted (installed module unchanged, audio back). Leads in tools/modem/wip/README.md.
+- mifmon now writes the ABOX start_vss attribute at CP power-up (no-op without it).
+- Network mode back to 2g|3g|4g.
