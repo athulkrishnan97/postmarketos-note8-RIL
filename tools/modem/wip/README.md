@@ -42,3 +42,37 @@ Next: why VSS outputs silence. Candidates: the CP->VSS voice ring in the
 VSS memory (+0x504000.. changes during calls), VSS volume/mute on the ABOX
 side, and the stock HAL's exact call sequence (audio_hw for universal8895
 and secril-client). Then the codec routes: earpiece out and main mic in.
+
+## 2026-10-12 evening: downlink still silent (measured end to end)
+
+- Phone warmth: Spectacle left over from screenshot work was spinning at 82%
+  CPU, plus my silent test streams and a sleep inhibitor (CPU 95 C). Killed:
+  59 C idle. Test scripts now start streams per test only.
+- Stock HAL call sequence (reversed from audio.primary.universal8895.so,
+  libaudio-ril.so, libvndsecril-client.so):
+  1. "ABOX Audio Mode"=2. The downstream driver only stores it.
+  2. incall_{nb|wb}-<dev> mixer paths.
+  3. Open and start pcmC0D4p (RDMA4) and pcmC0D10c (WDMA2): 48 kHz, 2 ch,
+     S16, period 160 x 2. 1024 zero bytes are written first.
+  4. RIL calls, in order:
+     - 09 03 [path,extra]: handset 01, speaker 06, headset 02
+     - 09 01 [type,idx]: earpiece 01, speaker 11, headset 31; idx 0-5
+     - 09 0d [00,00]: mode 0. [02,xx] is refused (0x8001).
+     - 09 02 [00]: TX unmute
+     - 09 02 [02]: RX unmute (03 = mute)
+  The HAL sends no clock sync; realcall, WB-AMR and voice solution are stubs.
+  Reproduced all of it, with the PCMs started before or after connect: no change.
+- Measurements:
+  - The VSS RDMA4 SRAM buffer is all zero. The AP can read ABOX SRAM: the
+    vector table and IPC area read fine.
+  - Mixer loopback: setting ROUTE_CTRL1 NSRC0 = 1 (SIFS0) after the capture
+    starts (the driver resets it at capture start) records the mixer output.
+    Validated with a 440 Hz tone (RMS 5657, as expected). During a call it
+    records exact digital silence.
+- VSS (in VSS memory, strings): decodes the speech itself ("UMTS AMR",
+  "AMR WB FR"), has RX/TX mute counters (never logged), and gears
+  100M/600M/1200M. Pages from VSS+0x520000 carry 0x3d-byte records during
+  calls (an AMR-WB frame size?): frames may be flowing CP<->VSS.
+- Open suspect: VSS runs capped at 590 MHz. Full speed (1.18 GHz) needs the
+  INT bus/rail raised, as downstream does with pm_qos_int. Our kernel exposes
+  no regulator for it (only vdd_mif), and ECT has no ABOX domain.
