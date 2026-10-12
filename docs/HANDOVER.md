@@ -912,3 +912,14 @@ the work below was done offline.)
 - Caveats: legacy dashdemux cannot take the plugin's in-memory DASH manifest; the
   yt-dlp plugin's gschemas.compiled is missing (its settings, e.g. codec order, fall
   back to defaults: avc1 first).
+
+## 2026-10-12 ~14:10 GTK4 UI EMPTY ON PANFROST -> CAIRO RENDERER
+- Clapper's window was empty: spectacle screenshots show GTK's GL renderer draws only
+  solid rectangles (no text, icons, rounded corners; video dimmed). Same with Mesa 26.2.4
+  (unpacked privately in /tmp/m2, system Mesa untouched) and with forced panvk Vulkan. No
+  GTK/Panfrost/Bifrost debug switch changes it: Mesa bug on Mali-G71 (BRINGUP.md).
+- Workaround applied: ~/.local/share/applications overrides launch Clapper and Pipeline
+  with GSK_RENDERER=cairo (setup script does the same). UI renders correctly. Cost:
+  1080p30 local playback ~121% of a core vs ~26% under GL.
+- Open: find the Mesa bug (GTK uses instanced vertex data; suspect it reads as zero) to
+  get the GL path back; other GTK4 apps need the same env until then.

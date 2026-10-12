@@ -1214,6 +1214,18 @@ the yt-dlp plugin, curl instead of souphttpsrc, and no media-scanner enhancer:
 a second adaptivedemux2 libsoup session in the process trips libsoup's thread
 assertion). The yt-dlp plugin prefers H.264, then AV1 (software here).
 
+GTK4 apps (Clapper, Pipeline, any libadwaita app) render an empty UI with GTK's
+GPU renderers on Panfrost/Mali-G71: solid rectangles draw, but text, icons,
+rounded corners do not, and video comes out dimmed. Shaders
+compile; GTK 4.24.1 with Mesa 26.2.3 and 26.2.4 GL and with panvk Vulkan
+(forced, `PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1`) give the same picture, and no
+`GSK_GPU_DISABLE`, `GDK_GL_DISABLE`, `PAN_MESA_DEBUG` or `BIFROST_MESA_DEBUG`
+switch changes it. The two paths share only the Bifrost compiler and the
+hardware, so this is a Mesa-on-G71 bug; Qt/Plasma are unaffected.
+Workaround: `GSK_RENDERER=cairo` in user overrides of the two apps' launchers
+(setup script). Cost: Clapper at 1080p30 uses ~121% of one core vs ~26% with
+the GL renderer, since cairo copies every video frame through the CPU.
+
 Driver fixes found through GStreamer renegotiation (adaptive streams reopen the
 decoder on the same file at each resolution step): REQBUFS(0) on CAPTURE now
 resets the capture queue state (mainline left it "mapped", so the reopened

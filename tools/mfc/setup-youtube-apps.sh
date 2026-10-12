@@ -11,6 +11,9 @@
 # - Clapper's media-scanner runs a second pipeline on the same item; two
 #   adaptivedemux2 libsoup sessions in one process hit the same assertion.
 #   Load every enhancer except the media scanner.
+# - GTK4's GL/Vulkan renderers draw no text, icons or rounded corners on
+#   Panfrost/Mali-G71 (Mesa bug, docs/BRINGUP.md): launch both apps with the
+#   cairo renderer (costs CPU on video, but the UI works).
 set -eu
 
 sudo apk add clapper clapper-enhancers libpeas2-python3 pipeline yt-dlp
@@ -30,5 +33,13 @@ cat > "$HOME/.config/plasma-workspace/env/gst-http.sh" <<'EOT'
 export GST_PLUGIN_FEATURE_RANK="curlhttpsrc:PRIMARY,souphttpsrc:NONE"
 export CLAPPER_ENHANCERS_PATH="$HOME/.local/share/clapper-enhancers"
 EOT
+
+mkdir -p "$HOME/.local/share/applications"
+for a in com.github.rafostar.Clapper de.schmidhuberj.tubefeeder; do
+	sed -E 's/^Exec=/Exec=env GSK_RENDERER=cairo /' \
+		"/usr/share/applications/$a.desktop" \
+		> "$HOME/.local/share/applications/$a.desktop"
+done
+kbuildsycoca6 >/dev/null 2>&1 || true
 sync
 echo "done; log out and back in"
