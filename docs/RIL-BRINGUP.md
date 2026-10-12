@@ -257,13 +257,26 @@ mifmon also answers ModemManager's AT+CGDCONT=? itself: right after a CP boot
 its own AT+CGATT=1 can hold the channel past ModemManager's timeout, and
 ModemManager then believed the modem had no IP support.
 
-## 9. Calls (not working yet)
+## 9. Calls
 
 - This SIM (Lidl Connect, an MVNO on eir) gets no circuit-switched registration
   on LTE (+CREG 0; the CP reports no CS domain), only SMS over SGs. Voice on LTE
-  would need VoLTE (IMS). On GSM (`mmcli -m any --set-allowed-modes=2g`) CS registers within ~20 s;
-  EDGE data keeps working (ping 140-640 ms).
-- ModemManager reports no voice capability: it probes with ATH, which the CP
-  refuses (+CME ERROR: 3). Call control is IPC (CALL group 02), like incoming SMS.
-- Changing the network mode while an IPC data call is up wedged the AT channel
-  once (no replies at all); a CP restart (`rc-service modem-ipc restart`) fixed it.
+  would need VoLTE (IMS). On GSM (`mmcli -m any --set-allowed-modes=2g`) CS
+  registers within ~20 s; EDGE data keeps working (ping 140-640 ms).
+- Call control: the CP refuses ATH (+CME ERROR: 3), which ModemManager uses to
+  probe voice support; the stock RIL drives calls over IPC (CALL group 02).
+  mifmon emulates ModemManager's 27.007 voice commands on top of it (ATD, ATA,
+  +CHUP, +CHLD, +CLCC, +VTS; RING/+CLIP, +CCWA and NO CARRIER from the CP's
+  call list), and drops the CP's own call codes on the AT channel (a CONNECT
+  made ModemManager re-probe the modem). Frame layouts: mifmon.c.
+- Tested (2G, call to the SIM's own number / voicemail): ModemManager goes
+  dialing -> active, the CP reports outgoing -> alerting -> connected, hang-up
+  releases it.
+- Not working: the CP crashes (CP_CRASH_EXIT, cbd restarts it) ~20 s into a
+  connected call. The modem driver clears the "VSS magic code" as it goes: the
+  voice firmware (VSS) runs on the ABOX, in a window the ABOX driver currently
+  backs with a dummy page (exynos8895-audio-vss.patch). Calls need the real VSS
+  memory mapped there, plus the call audio routing and microphones.
+- Testing a call by hand: hold a sleep inhibitor (a dialer app does), or the
+  phone suspends, ModemManager drops the modem and re-probes it:
+  `elogind-inhibit --what=sleep:idle --mode=block sleep 600 &`

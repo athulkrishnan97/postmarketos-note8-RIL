@@ -958,3 +958,16 @@ the work below was done offline.)
 - Tested: LTE -> 2G (EDGE data OK) -> LTE: data back without intervention.
 - IPC CALL group decoded (background agent, from libsec-ril IpcProtocol41): see the
   header comment of the call code in mifmon once written. Next: call bridge.
+
+## 2026-10-12 ~16:20 CALL CONTROL OVER IPC; CP CRASHES DURING CALLS (VSS)
+- mifmon: ModemManager voice works (MM had no voice: CP refuses ATH). IPC CALL group
+  bridged to 27.007 (see RIL-BRINGUP section 9). ATH is a no-op (MM's probe, also after
+  resume with a call up); +CHLD=1x with one call -> RELEASE (MANAGE 3 refused 0x8001);
+  +CLCC index = CP id + 1 (MM: 0 = unknown).
+- MO call to own number on 2G: dialing -> active in MM, hang-up OK.
+- Unrelated drop of the modem mid-test: the phone suspended (no inhibitor) and MM
+  re-probed after resume.
+- CP_CRASH_EXIT ~20 s into a connected call, "clean_vss_magic_code" in dmesg: VSS not
+  running (ABOX VSS window is the dummy page). Next: map the modem's VSS memory into
+  the ABOX IOMMU window at 0xa0000000 and boot VSS like downstream.
+- Network mode left at 2g|3g|4g (LTE) after the tests.

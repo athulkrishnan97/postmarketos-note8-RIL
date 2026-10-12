@@ -948,6 +948,275 @@ static void rat_tick(void)
 	}
 }
 
+/*
+ * Voice calls, for ModemManager's generic (27.007) voice support. The CP
+ * refuses call control on the AT channel (ATH: +CME ERROR: 3); the stock
+ * RIL uses IPC CALL (group 02, decoded from libsec-ril IpcProtocol41):
+ *   ORIGINATE 02 01 EXEC, 99 bytes: u16 call type (00 01 = CS voice),
+ *       u8 clir (0 default), u8 number length, u8 number type (0x11 with a
+ *       leading '+', else 0x21), ascii number (with the '+'), zero filled
+ *   RELEASE 02 03 EXEC, ANSWER 02 04 EXEC: no data
+ *   MANAGE 02 0c SET, 92 bytes: u8 type, u8 call id (ff none) - types:
+ *       1 release held/waiting (CHLD 0), 2 release active + accept other
+ *       (CHLD 1), 3 release call id (CHLD 1x), 4 swap (CHLD 2), 5 split id
+ *       (CHLD 2x), 6 conference (CHLD 3), 7 transfer (CHLD 4)
+ *   CONT_DTMF 02 08 SET: u8 1 start / 2 stop, u8 ascii digit
+ *   CALL_LIST 02 06 GET -> RESP: u8 count, per call: u16 type, u8 id,
+ *       u8 direction (1 = MO), u8 state (minus 1: 0 active, 1 held,
+ *       2 dialing, 3 alerting, 4 incoming, 5 waiting - as in +CLCC),
+ *       u8 multiparty, u8 number length, u8 number type (bits 4-6 = 1:
+ *       international), number
+ *   INCOMING 02 02, WAITING 02 09, CALL_STATUS 02 05 (u16 type, id,
+ *       state: 1 outgoing, 3 connected, 4 released, 5 alerting, 6 held),
+ *       CALL_LIST 02 06 NOTI: re-read the list
+ * The list is re-read on every call event; AT+CLCC is answered from it
+ * (index = CP call id + 1: ModemManager takes index 0 as unknown),
+ * RING/+CLIP and NO CARRIER are generated from its changes.
+ */
+#define MAX_CALLS	8
+
+struct call {
+	unsigned int id, mt, stat, mpty, intl;
+	char num[84];
+};
+
+static struct {
+	struct call c[MAX_CALLS];
+	int n;
+	int dial;		/* ATD waiting for the CP */
+	time_t dial_since;
+	time_t ring;		/* last RING sent */
+} vc;
+
+static void call_send(uint8_t index, uint8_t type, const uint8_t *data, size_t len, size_t total)
+{
+	uint8_t f[128] = { 0 };
+
+	f[4] = 0x02;
+	f[5] = index;
+	f[6] = type;
+	if (len)
+		memcpy(f + 7, data, len);
+	fmt_send(f, total < 7 + len ? 7 + len : total);
+}
+
+static void call_get_list(void)
+{
+	call_send(0x06, 0x02, NULL, 0, 7);
+}
+
+static void call_clip(const struct call *c, int waiting)
+{
+	char out[160];
+
+	if (waiting)
+		snprintf(out, sizeof(out), "\r\n+CCWA: \"%s\",%u,1\r\n",
+			 c->num, c->intl ? 145 : 129);
+	else
+		snprintf(out, sizeof(out), "\r\nRING\r\n\r\n+CLIP: \"%s\",%u\r\n",
+			 c->num, c->intl ? 145 : 129);
+	px_reply(out);
+}
+
+static void call_list_rx(const uint8_t *p, size_t n)
+{
+	struct call old[MAX_CALLS];
+	int nold = vc.n, i, j;
+	size_t o = 8;
+
+	memcpy(old, vc.c, sizeof(old));
+	vc.n = 0;
+	for (i = 0; i < p[7] && vc.n < MAX_CALLS && o + 8 <= n; i++) {
+		struct call *c = &vc.c[vc.n];
+		size_t len = p[o + 6];
+
+		if (o + 8 + len > n || !p[o + 4])
+			break;
+		c->id = p[o + 2];
+		c->mt = p[o + 3] != 1;
+		c->stat = p[o + 4] - 1;
+		c->mpty = p[o + 5] == 1;
+		c->intl = ((p[o + 7] >> 4) & 7) == 1;
+		if (len > sizeof(c->num) - 2)
+			len = sizeof(c->num) - 2;
+		c->num[0] = 0;
+		if (c->intl && len && p[o + 8] != '+')
+			strcpy(c->num, "+");
+		strncat(c->num, (const char *)p + o + 8, len);
+		vc.n++;
+		o += 8 + p[o + 6];
+	}
+	stamp();
+	printf("CALL list: %d call(s)", vc.n);
+	for (i = 0; i < vc.n; i++)
+		printf(" [id %u %s stat %u]", vc.c[i].id, vc.c[i].mt ? "MT" : "MO", vc.c[i].stat);
+	printf("\n");
+
+	/* new incoming / waiting calls */
+	for (i = 0; i < vc.n; i++) {
+		int seen = 0;
+
+		for (j = 0; j < nold; j++)
+			if (old[j].id == vc.c[i].id)
+				seen = 1;
+		if (!seen && vc.c[i].stat == 4) {
+			call_clip(&vc.c[i], 0);
+			vc.ring = now_s();
+		} else if (!seen && vc.c[i].stat == 5) {
+			call_clip(&vc.c[i], 1);
+		}
+	}
+	/* calls gone: ModemManager re-reads +CLCC on NO CARRIER */
+	for (j = 0; j < nold; j++) {
+		int still = 0;
+
+		for (i = 0; i < vc.n; i++)
+			if (old[j].id == vc.c[i].id)
+				still = 1;
+		if (!still) {
+			px_reply("\r\nNO CARRIER\r\n");
+			break;
+		}
+	}
+}
+
+static void call_rx(const uint8_t *p, size_t n)
+{
+	if (n >= 12 && p[4] == 0x80 && p[5] == 0x01 && p[7] == 0x02) {
+		unsigned int code = p[10] | p[11] << 8;
+
+		stamp();
+		printf("CALL 02%02x -> 0x%04x\n", p[8], code);
+		if (vc.dial && p[8] == 0x01) {
+			vc.dial = 0;
+			px_reply(code == 0x8000 ? "\r\nOK\r\n" : "\r\nNO CARRIER\r\n");
+		}
+		return;
+	}
+	if (n < 7 || p[4] != 0x02)
+		return;
+	if (p[5] == 0x06 && p[6] == 0x02 && n >= 8) {
+		call_list_rx(p, n);
+		return;
+	}
+	if (p[5] == 0x05 && n >= 11) {
+		stamp();
+		printf("CALL status id %u state %u cause %u/%u\n", p[9], p[10],
+		       n >= 13 ? p[11] : 0, n >= 13 ? p[12] : 0);
+		if (vc.dial && p[10] == 1) {
+			vc.dial = 0;
+			px_reply("\r\nOK\r\n");
+		}
+	}
+	if (p[5] == 0x02 || p[5] == 0x05 || p[5] == 0x06 || p[5] == 0x09)
+		call_get_list();
+}
+
+static void call_tick(void)
+{
+	int i;
+
+	if (vc.dial && now_s() - vc.dial_since > 10) {
+		vc.dial = 0;
+		px_reply("\r\nNO CARRIER\r\n");
+	}
+	for (i = 0; i < vc.n; i++)
+		if (vc.c[i].stat == 4 && now_s() - vc.ring >= 3) {
+			call_clip(&vc.c[i], 0);
+			vc.ring = now_s();
+		}
+}
+
+static void call_manage(uint8_t type, uint8_t id)
+{
+	uint8_t d[2] = { type, id };
+
+	call_send(0x0c, 0x03, d, 2, 92);
+}
+
+/* voice AT commands from ModemManager; 0 = not one of them */
+static int call_at(const char *cmd)
+{
+	char out[1024];
+	size_t len, o;
+	unsigned int a;
+	int i;
+
+	if (!strcmp(cmd, "ATH") || !strcmp(cmd, "ATH0")) {
+		/*
+		 * Only ModemManager's voice support probe (it hangs up with
+		 * +CHUP); it also comes after a resume, with a call up.
+		 */
+	} else if (!strcmp(cmd, "AT+CHUP")) {
+		if (vc.n || vc.dial)
+			call_send(0x03, 0x01, NULL, 0, 7);	/* RELEASE */
+	} else if (!strcmp(cmd, "ATA")) {
+		call_send(0x04, 0x01, NULL, 0, 7);		/* ANSWER */
+	} else if (!strncmp(cmd, "ATD", 3) && cmd[strlen(cmd) - 1] == ';') {
+		uint8_t d[92] = { 0x00, 0x01, 0 };	/* CS voice, CLIR default */
+
+		len = strlen(cmd) - 4;
+		if (len < 1 || len > 82)
+			return px_reply("\r\nERROR\r\n"), 1;
+		d[3] = len;
+		d[4] = cmd[3] == '+' ? 0x11 : 0x21;
+		memcpy(d + 5, cmd + 3, len);
+		call_send(0x01, 0x01, d, sizeof(d), 99);	/* ORIGINATE */
+		vc.dial = 1;
+		vc.dial_since = now_s();
+		return 1;	/* OK when the CP accepts */
+	} else if (!strcmp(cmd, "AT+CLCC")) {
+		o = snprintf(out, sizeof(out), "\r\n");
+		for (i = 0; i < vc.n; i++)
+			o += snprintf(out + o, sizeof(out) - o,
+				      "+CLCC: %u,%u,%u,0,%u,\"%s\",%u\r\n",
+				      vc.c[i].id + 1, vc.c[i].mt, vc.c[i].stat,
+				      vc.c[i].mpty, vc.c[i].num,
+				      vc.c[i].intl ? 145 : 129);
+		snprintf(out + o, sizeof(out) - o, "\r\nOK\r\n");
+		px_reply(out);
+		return 1;
+	} else if (!strcmp(cmd, "AT+CCWA=1,2")) {
+		px_reply("\r\n+CCWA: 0,1\r\n\r\nOK\r\n");
+		return 1;
+	} else if (sscanf(cmd, "AT+CHLD=%u", &a) == 1) {
+		if (a == 0)
+			call_manage(1, 0xff);
+		else if (a == 1)
+			call_manage(2, 0xff);
+		else if (a == 2)
+			call_manage(4, 0xff);
+		else if (a == 3)
+			call_manage(6, 0xff);
+		else if (a == 4)
+			call_manage(7, 0xff);
+		else if (a >= 11 && a < 20 && vc.n <= 1)
+			call_send(0x03, 0x01, NULL, 0, 7);	/* the only call: RELEASE */
+		else if (a >= 11 && a < 20)
+			call_manage(3, a - 11);
+		else if (a >= 21 && a < 30)
+			call_manage(5, a - 21);
+		else
+			return px_reply("\r\nERROR\r\n"), 1;
+	} else if (!strncmp(cmd, "AT+VTS=", 7) && cmd[7]) {
+		uint8_t d[2] = { 1, (uint8_t)cmd[7] };
+
+		call_send(0x08, 0x03, d, 2, 9);
+		usleep(250000);
+		d[0] = 2;
+		d[1] = 0;
+		call_send(0x08, 0x03, d, 2, 9);
+	} else if (!strcmp(cmd, "AT+CLCC=?") || !strncmp(cmd, "AT+CLIP=", 8) ||
+		   !strncmp(cmd, "AT+CRC=", 7) || !strncmp(cmd, "AT+CCWA=", 8) ||
+		   !strncmp(cmd, "AT+VTD=", 7)) {
+		;	/* nothing to set up: the URCs come from here */
+	} else {
+		return 0;
+	}
+	px_reply("\r\nOK\r\n");
+	return 1;
+}
+
 static void dc_mm_cgact(int on, unsigned int cid);
 static void dc_mm_status(char *out, size_t len);
 static int dc_mm_contrdp(char *out, size_t len);
@@ -985,7 +1254,7 @@ static int px_local(const uint8_t *p, size_t n)
 		 */
 		px_reply("\r\n+CGDCONT: (1-11),\"IP\",,,(0-3),(0-4)\r\n"
 			 "\r\n+CGDCONT: (1-11),\"PPP\",,,(0-3),(0-4)\r\n\r\nOK\r\n");
-	} else if (sms_at(cmd) || rat_at(cmd)) {
+	} else if (sms_at(cmd) || rat_at(cmd) || call_at(cmd)) {
 		;
 	} else if (dc.on_demand && sscanf(cmd, "AT+CGACT=%u,%u", &a, &b) == 2 && a <= 1) {
 		dc_mm_cgact(a, b);	/* replies itself, maybe later */
@@ -1005,18 +1274,66 @@ static int px_local(const uint8_t *p, size_t n)
 	return 1;
 }
 
+/*
+ * The CP's own call result codes and URCs on the AT channel (it reports
+ * calls there too, e.g. CONNECT when a call is answered). ModemManager gets
+ * ours from the IPC call state instead; a stray CONNECT made it take the
+ * port for a data call and probe the modem all over again.
+ */
+static int cp_call_urc(const uint8_t *l, size_t n)
+{
+	static const char *const urc[] = {
+		"CONNECT", "RING", "NO CARRIER", "BUSY", "NO ANSWER",
+		"+CLIP:", "+CRING:", "+CCWA:", "+COLP:",
+	};
+	size_t i, k;
+
+	for (i = 0; i < sizeof(urc) / sizeof(urc[0]); i++) {
+		k = strlen(urc[i]);
+		if (n >= k && !memcmp(l, urc[i], k) &&
+		    (urc[i][k - 1] == ':' || n == k || l[k] == ' '))
+			return 1;
+	}
+	return 0;
+}
+
+/* p without the lines above; returns the new length (in place) */
+static size_t cp_filter(uint8_t *p, size_t n)
+{
+	size_t i = 0, w = 0, ds, ls;
+
+	while (i < n) {
+		ds = i;
+		while (i < n && (p[i] == '\r' || p[i] == '\n'))
+			i++;
+		ls = i;
+		while (i < n && p[i] != '\r' && p[i] != '\n')
+			i++;
+		if (i > ls && cp_call_urc(p + ls, i - ls))
+			continue;
+		memmove(p + w, p + ds, i - ds);
+		w += i - ds;
+	}
+	return w;
+}
+
 /* bytes from ModemManager */
 static void px_mm_rx(const uint8_t *p, size_t n)
 {
 	if (px.prompt && (memchr(p, 0x1a, n) || memchr(p, 0x1b, n)))
 		px.prompt = 0;	/* PDU sent (Ctrl-Z) or cancelled (ESC) */
-	/* answered here even while our own command holds the CP */
-	if (!px.mm_pending && !px.qlen && px_local(p, n))
+	/*
+	 * Answered here even while our own command holds the CP or a
+	 * command of ModemManager's is still unanswered: ModemManager sends
+	 * the next command only after a reply or its timeout.
+	 */
+	if (px_local(p, n))
 		return;
 	if (px.own_active || px.own_wait) {
-		if (px.qlen + n <= sizeof(px.q)) {
-			memcpy(px.q + px.qlen, p, n);
-			px.qlen += n;
+		/* a command still queued here was given up by ModemManager */
+		if (n <= sizeof(px.q)) {
+			memcpy(px.q, p, n);
+			px.qlen = n;
 		}
 		return;
 	}
@@ -1581,6 +1898,7 @@ int main(int argc, char **argv)
 			dc_tick();
 		sms_announce();
 		rat_tick();
+		call_tick();
 		if (px.prompt && now_s() - px.prompt > 20) {
 			/*
 			 * MM gave up on an SMS (no PDU after the prompt): leave
@@ -1630,6 +1948,7 @@ int main(int argc, char **argv)
 				if (n >= 7 && buf[4] == 0x04 && buf[5] == 0x02)
 					sms_incoming(buf, n);
 				rat_rx(buf, n);
+				call_rx(buf, n);
 				if (data)
 					dc_rx(buf, n);
 			}
@@ -1640,6 +1959,9 @@ int main(int argc, char **argv)
 					show_rfs("rx", buf, n);
 			} else if (i == 2) {
 				show_raw("ROUTER", buf, n);
+				n = cp_filter(buf, n);
+				if (!n)
+					continue;
 				if (px.own_active && px.ctl) {
 					size_t h = strlen(px.ctlrx);
 
