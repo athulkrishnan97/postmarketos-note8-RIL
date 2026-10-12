@@ -1096,11 +1096,22 @@ test that needs no ears.
 ## Hardware video codec: MFC v11 (kernel 7.0-r15)
 
 The Exynos 8895 Multi Format Codec runs under mainline's `s5p-mfc` V4L2
-mem2mem driver (`exynos8895-mfc.patch`, module `s5p_mfc`). It exposes H.264,
-HEVC, VP8, VP9, MPEG-2/4, VC-1 and H.263 decoders and H.264/HEVC/VP8/MPEG-4
-encoders; **H.264 decoding is verified**. HEVC decodes headers but every frame
-comes back flagged as a decode error, VP9 returns nothing (firmware error 0x22,
-NO_KEY_FRAME), and the encoders are untested.
+mem2mem driver (`exynos8895-mfc.patch`, module `s5p_mfc`). Checked against
+ffmpeg's software decoders with 720p test streams (150 frames each):
+
+| Codec | Result |
+|---|---|
+| H.264, HEVC, VP9, VP8 decode | bit-identical to software |
+| MPEG-2 decode | 73 dB PSNR vs software (IDCT is not bit-exact by spec) |
+| MPEG-4 Part 2 decode | 57 dB (IDCT drift over P-frames); needs the VOL in-band |
+| H.263 decode (CIF) | 69 dB |
+| H.264 encode | High profile, 40.7 dB PSNR at 4 Mb/s; input must be NV21 |
+| VC-1 decode, HEVC/VP8/MPEG-4/H.263 encode | not tested |
+
+MPEG-4 in MP4 keeps the VOL header in the container, which ffmpeg's
+`mpeg4_v4l2m2m` does not send (HEADER_NOT_FOUND, 0x66); an elementary stream
+or GStreamer's `mpeg4videoparse` works. Raw streams without timestamps need
+`-fps_mode passthrough` in ffmpeg or it drops frames.
 
     s5p-mfc 13ce0000.codec: firmware 191118, hardware version 0x1100
 
@@ -1124,6 +1135,12 @@ What the port is made of:
   (`v11_dec_opts`/`v11_sei` module parameters), per-frame DEC_TIMEOUT, CPB size
   = real buffer size. The firmware is reloaded on every boot of the codec (it
   modifies its own image while running, as on v12).
+- **Header buffer.** The buffer used for the header parse also holds the first
+  key frame. Mainline re-submits its unconsumed tail only for H.264 and drops
+  it otherwise, so every later frame failed with SYNC_POINT_NOT_RECEIVED
+  (0xBE; HEVC, MPEG-2) or NO_KEY_FRAME (0x22; VP9). On v11, as the vendor
+  driver: HEVC uses the H.264 consumed-bytes check, every other codec decodes
+  the header buffer again from the start.
 - **Firmware below every buffer.** The firmware rejects the stream header
   (SEQ_HEADER -> error 0x37, ~50 us after the command) when the stream buffer
   is below its base. The vendor kernel's IOVA allocator is bottom-up, so the
@@ -1171,5 +1188,6 @@ and the MFC buffers are uncached, so a `fakesink` pipeline is CPU-bound
 DMA-BUFs (GPU/KMS) avoid that. `tools/mfc/mfctest.sh` has the checks used
 here.
 
-Boot images: v194 (MFC nodes + IOVA reservation merged into the v186 dtb with
-`tools/mfc/mfc_dtb_merge.py` and `mfc_iova_dt.py`).
+Boot images: v195 (Image from the patch as committed; MFC nodes + IOVA
+reservation merged into the v186 dtb with `tools/mfc/mfc_dtb_merge.py` and
+`mfc_iova_dt.py`).

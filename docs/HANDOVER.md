@@ -852,5 +852,16 @@ the work below was done offline.)
   may be half off: it runtime-resumes CMU_MFC and hangs.
 - Open: domain power-down after use (vendor sequence not found; costs idle leakage while
   the module is loaded); GStreamer copies frames out of uncached buffers (zero-copy needs
-  a DMA-BUF consumer); HEVC: every frame flagged as a decode error (headers parse);
-  VP9: no output, firmware error 0x22 (NO_KEY_FRAME); encoders untested.
+  a DMA-BUF consumer).
+
+## 2026-10-12 ~10:45 MFC CLOSED OUT: ALL TESTABLE CODECS WORK, PHONE ON v195
+- HEVC/VP9 (and MPEG-2) failed because the header buffer, which also holds the first key
+  frame, was dropped after the header parse (mainline keeps it only for H.264). Fixed for
+  v11 as the vendor driver does. Now bit-identical to software: H.264, HEVC, VP9, VP8;
+  MPEG-2 73 dB, MPEG-4 57 dB, H.263 69 dB (non-bit-exact IDCT); H.264 encode works (NV21
+  input, 40.7 dB at 4 Mb/s). Matrix and caveats: BRINGUP.md MFC section.
+- boot-v195-mfc.img flashed = Image from the committed patch (+ same dtb as v194);
+  module = committed patch. Verified after a cold boot: autoload, firmware boot at ~5.6 s,
+  1080p H.264 at 280 fps.
+- Test streams are synthetic (ffmpeg -f lavfi -i testsrc2, 720p, 5 s per codec).
+- Still untested: VC-1 decode (no encoder to make a stream), HEVC/VP8/MPEG-4/H.263 encode.
