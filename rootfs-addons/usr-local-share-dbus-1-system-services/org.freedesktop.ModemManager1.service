@@ -1,0 +1,9 @@
+# Override of /usr/share/dbus-1/system-services/org.freedesktop.ModemManager1.service
+# (greatlte): ModemManager is D-Bus-activated as soon as anything asks for
+# it, which can beat the OpenRC service; start it with the same options as
+# /etc/conf.d/modemmanager either way.
+[D-BUS Service]
+Name=org.freedesktop.ModemManager1
+Exec=/usr/sbin/ModemManager --test-quick-suspend-resume
+User=root
+SystemdService=dbus-org.freedesktop.ModemManager1.service

@@ -92,6 +92,11 @@ install -D -m 644 "$ADDONS/etc-udev-rules.d/61-greatlte-modem.rules" \
 	"$MNT/etc/udev/rules.d/61-greatlte-modem.rules"
 install -D -m 644 "$ADDONS/etc-udev-rules.d/78-greatlte-mm.rules" \
 	"$MNT/etc/udev/rules.d/78-greatlte-mm.rules"
+# ModemManager is D-Bus-activated as soon as Plasma asks for it, which can
+# beat the OpenRC service: start it with the same options either way
+install -D -m 644 \
+	"$ADDONS/usr-local-share-dbus-1-system-services/org.freedesktop.ModemManager1.service" \
+	"$MNT/usr/local/share/dbus-1/system-services/org.freedesktop.ModemManager1.service"
 # Call audio (earpiece and mics while a call is up); enable it together
 # with the modem: rc-update add callaudio default
 TOOLS="$ADDONS/../tools"

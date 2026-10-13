@@ -951,6 +951,94 @@ static void rat_tick(void)
 }
 
 /*
+ * Registration URCs. On every cell change the CP sends +CREG 0, +CGREG 2
+ * and +CEREG 2 ("searching") and no URC once it is registered on the new
+ * cell, although AT+CEREG? then answers registered. ModemManager keeps the
+ * last URC: registration "searching", no access technology. So after any
+ * registration URC, ask the CP (+CREG?, +CGREG?, +CEREG?, one at a time)
+ * and pass the answers on as URCs, i.e. without the leading <n> field.
+ */
+static const char *const reg_cmds[] = { "AT+CREG?", "AT+CGREG?", "AT+CEREG?" };
+
+static struct {
+	time_t check;		/* when to send the next query, 0 = none */
+	unsigned int step;	/* next query in reg_cmds */
+	int active;		/* our query is the running own command */
+} reg;
+
+static int reg_line(const char *l, size_t n)
+{
+	return (n > 7 && !memcmp(l, "+CREG: ", 7)) ||
+	       (n > 8 && (!memcmp(l, "+CGREG: ", 8) || !memcmp(l, "+CEREG: ", 8)));
+}
+
+/* CP output that ModemManager gets as URCs: re-check after reg URCs */
+static void reg_urc_seen(const uint8_t *p, size_t n)
+{
+	size_t i;
+
+	if (reg.active)
+		return;
+	for (i = 0; i < n; i++)
+		if (p[i] == '+' && (i == 0 || p[i - 1] == '\n') &&
+		    reg_line((const char *)p + i, n - i)) {
+			reg.check = now_s() + 3;
+			reg.step = 0;
+			return;
+		}
+}
+
+/*
+ * Our query finished: its "+xREG: <n>,<stat>..." answer goes to
+ * ModemManager as the URC "+xREG: <stat>...". Any other "+" line in the
+ * output (a URC that came in meanwhile) is passed on unchanged.
+ */
+static void reg_done(const char *out)
+{
+	const char *want = reg_cmds[reg.step] + 2;	/* "+CREG?" etc. */
+	size_t wlen = strlen(want) - 1;			/* "+CREG" */
+	const char *l = out, *e, *c;
+	int converted = 0;
+
+	reg.active = 0;
+	while (*l && px.fd >= 0) {
+		e = strpbrk(l, "\r\n");
+		if (!e)
+			e = l + strlen(l);
+		c = memchr(l, ',', e - l);
+		if (!converted && c && (size_t)(e - l) > wlen + 2 &&
+		    !memcmp(l, want, wlen) && l[wlen] == ':') {
+			converted = 1;
+			if (write(px.fd, "\r\n", 2) < 0 ||
+			    write(px.fd, l, wlen + 2) < 0 ||
+			    write(px.fd, c + 1, e - c - 1) < 0 ||
+			    write(px.fd, "\r\n", 2) < 0)
+				perror("mifmon: write wwan_at_ctl");
+		} else if (e > l && *l == '+' &&
+			   !(e - l >= 10 && !memcmp(l, "+CME ERROR", 10))) {
+			if (write(px.fd, "\r\n", 2) < 0 ||
+			    write(px.fd, l, e - l) < 0 ||
+			    write(px.fd, "\r\n", 2) < 0)
+				perror("mifmon: write wwan_at_ctl");
+		}
+		l = *e ? e + 1 : e;
+	}
+	if (++reg.step < sizeof(reg_cmds) / sizeof(reg_cmds[0]))
+		reg.check = now_s();
+	else
+		reg.check = 0;
+}
+
+static void reg_tick(void)
+{
+	if (!reg.check || now_s() < reg.check || px.fd < 0)
+		return;
+	reg.active = 1;
+	if (!own_at(reg_cmds[reg.step]))
+		reg.active = 0;	/* channel busy: next tick */
+}
+
+/*
  * Voice calls, for ModemManager's generic (27.007) voice support. The CP
  * refuses call control on the AT channel (ATH: +CME ERROR: 3); the stock
  * RIL uses IPC CALL (group 02, decoded from libsec-ril IpcProtocol41):
@@ -1402,6 +1490,7 @@ static void px_forward_urcs(const uint8_t *p, size_t n)
 
 	if (px.fd < 0)
 		return;
+	reg_urc_seen(p, n);
 	while (i < n) {
 		while (i < n && (p[i] == '\r' || p[i] == '\n'))
 			i++;
@@ -1409,7 +1498,14 @@ static void px_forward_urcs(const uint8_t *p, size_t n)
 		while (i < n && p[i] != '\r' && p[i] != '\n')
 			i++;
 		end = i;
+		/*
+		 * Registration lines are not passed on as they are: they may be
+		 * our own query's answer (with the leading <n>) or the CP's
+		 * unreliable cell-change URCs; reg_urc_seen() above has the
+		 * state re-read and passed on in URC form instead.
+		 */
 		if (end > start && p[start] == '+' &&
+		    !reg_line((const char *)p + start, end - start) &&
 		    !(end - start >= 10 && !memcmp(p + start, "+CME ERROR", 10))) {
 			if (write(px.fd, "\r\n", 2) < 0 ||
 			    write(px.fd, p + start, end - start) < 0 ||
@@ -1439,8 +1535,10 @@ static void px_cp_rx(const uint8_t *p, size_t n)
 	}
 	if (px.fd >= 0 && write(px.fd, p, n) < 0)
 		perror("mifmon: write wwan_at_ctl");
-	if (!px.mm_pending)
-		return;		/* URC */
+	if (!px.mm_pending) {
+		reg_urc_seen(p, n);	/* URC */
+		return;
+	}
 	if (have + n >= sizeof(px.rx))
 		have = 0;
 	memcpy(px.rx + have, p, n);
@@ -1944,6 +2042,7 @@ int main(int argc, char **argv)
 			dc_tick();
 		sms_announce();
 		rat_tick();
+		reg_tick();
 		call_tick();
 		if (px.prompt && now_s() - px.prompt > 20) {
 			/*
@@ -2017,8 +2116,11 @@ int main(int argc, char **argv)
 						h = 0;
 					memcpy(px.ctlrx + h, buf, n);
 					px.ctlrx[h + n] = 0;
-					px_forward_urcs(buf, n);
+					if (!reg.active)
+						px_forward_urcs(buf, n);
 					if (at_final(px.ctlrx)) {
+						if (reg.active)
+							reg_done(px.ctlrx);
 						px.own_active = px.ctl = 0;
 						px_idle();
 					}
