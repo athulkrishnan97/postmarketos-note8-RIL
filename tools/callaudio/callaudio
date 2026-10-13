@@ -9,19 +9,23 @@
 #   downlink: UAIF0 -> AIF1RX1 -> HPOUT3L -> OUT3 demux HPOUT4 -> earpiece
 #   uplink:   main mic (IN3L) -> AIF1TX1, second mic (IN2L) -> AIF1TX2 -> UAIF0
 #
-# While a call is dialing, ringing out, active or held this daemon:
-#   - suspends PulseAudio's devices on the card, which hold hw:0,0
-#   - saves the mixer controls it changes and sets the routes above
-#   - runs a playback (silence) and a capture (discarded) stream on hw:0,0,
-#     which keep UAIF0 and the codec's AIF1 clocked
-#   - enables the ABOX call DMAs (RDMA4/WDMA2) through the driver's "call"
-#     attribute
-#   - once a call is active, sends the stock HAL's sound setup to the CP
-#     through mifmon (IPC SND: path handset, volume, mode, unmute)
+# As soon as a call exists (dialing, ringing in or out) this daemon arms the
+# ABOX side, which has to be in place before VSS sets up its channel about a
+# second after the call connects (started later, the uplink stays silent):
 #   - raises VDD_INT and lets the ABOX's Cortex-A7 run at gear 1 (1.18 GHz),
 #     which VSS asks for at call setup: at the 590 MHz gear-2 cap the uplink
 #     (software ASRC and noise suppression on the A7) comes out choppy, and
 #     at the boot VDD_INT (644 mV) gear 1 hangs the firmware
+#   - enables the ABOX call DMAs (RDMA4/WDMA2) through the driver's "call"
+#     attribute
+# While a call is dialing, ringing out, active or held (not while it only
+# rings in, so the ringtone keeps the speaker) it also:
+#   - suspends PulseAudio's devices on the card, which hold hw:0,0
+#   - saves the mixer controls it changes and sets the routes above
+#   - runs a playback (silence) and a capture (discarded) stream on hw:0,0,
+#     which keep UAIF0 and the codec's AIF1 clocked
+#   - once a call is active, sends the stock HAL's sound setup to the CP
+#     through mifmon (IPC SND: path handset, volume, mode, unmute)
 # and undoes all of it when the last call ends. VDD_INT goes back down only
 # once the A7 has left gear 1 (VSS drops it when the call is released).
 #
@@ -87,7 +91,8 @@ MM = "org.freedesktop.ModemManager1"
 MM_PATH = "/org/freedesktop/ModemManager1"
 CALL_IFACE = MM + ".Call"
 VOICE_IFACE = MM + ".Modem.Voice"
-DIALING, RINGING_OUT, ACTIVE, HELD, TERMINATED = 1, 2, 4, 5, 7
+DIALING, RINGING_OUT, RINGING_IN, ACTIVE, HELD, TERMINATED = 1, 2, 3, 4, 5, 7
+ARM_STATES = (DIALING, RINGING_OUT, RINGING_IN, ACTIVE, HELD)
 AUDIO_STATES = (DIALING, RINGING_OUT, ACTIVE, HELD)
 
 
@@ -202,7 +207,8 @@ class CallAudio:
 		self.bus = bus
 		self.calls = {}		# call path -> state
 		self.snd_sent = set()	# calls that got the SND setup
-		self.on = False
+		self.armed = False	# call DMAs started, VDD_INT raised
+		self.on = False		# codec routed, streams running
 		self.saved = []
 		self.streams = {}
 		self.vdd_int_boot = None	# BUCK4 value to restore, while raised
@@ -253,11 +259,17 @@ class CallAudio:
 		self.update()
 
 	def update(self):
-		want = any(s in AUDIO_STATES for s in self.calls.values())
-		if want and not self.on:
+		states = self.calls.values()
+		arm = any(s in ARM_STATES for s in states)
+		audio = any(s in AUDIO_STATES for s in states)
+		if arm and not self.armed:
+			self.arm()
+		if audio and not self.on:
 			self.start()
-		elif not want and self.on:
+		elif not audio and self.on:
 			self.stop()
+		if not arm and self.armed:
+			self.disarm()
 		if self.on and SEND_SND:
 			for path, state in self.calls.items():
 				if state == ACTIVE and path not in self.snd_sent:
@@ -265,18 +277,28 @@ class CallAudio:
 					log("sending SND setup")
 					mifmon_send(SND_SETUP)
 
+	def arm(self):
+		log("call path armed")
+		self.armed = True
+		self.boost(True)
+		write_sysfs(ABOX_CALL, "1")
+		GLib.timeout_add_seconds(10, self.watchdog)
+
+	def disarm(self):
+		log("call path disarmed")
+		self.armed = False
+		write_sysfs(ABOX_CALL, "0")
+		self.boost(False)
+
 	def start(self):
 		log("call audio on")
 		self.on = True
-		self.boost(True)
 		pulse_suspend(True)
 		self.saved = [(n, amixer_get(n)) for n, _ in CONTROLS]
 		for n, v in CONTROLS:
 			amixer_set(n, v)
 		self.start_stream("playback", 5)
 		self.start_stream("capture", 5)
-		write_sysfs(ABOX_CALL, "1")
-		GLib.timeout_add_seconds(10, self.watchdog)
 
 	def start_stream(self, kind, tries):
 		if not self.on:
@@ -300,20 +322,19 @@ class CallAudio:
 		return False
 
 	def watchdog(self):
-		if not self.on:
+		if not self.armed:
 			return False
 		for kind, p in list(self.streams.items()):
-			if p.poll() is not None:
+			if self.on and p.poll() is not None:
 				log(f"{kind} stream died, restarting")
 				self.start_stream(kind, 3)
 		# a call can vanish without a signal (ModemManager restart)
 		self.resync()
-		return self.on
+		return self.armed
 
 	def stop(self):
 		log("call audio off")
 		self.on = False
-		write_sysfs(ABOX_CALL, "0")
 		for p in self.streams.values():
 			p.terminate()
 		for p in self.streams.values():
@@ -327,7 +348,6 @@ class CallAudio:
 				amixer_set(n, v)
 		self.saved = []
 		pulse_suspend(False)
-		self.boost(False)
 
 	def boost(self, on):
 		"""VDD_INT up and A7 gear 1 allowed during calls."""
@@ -346,7 +366,7 @@ class CallAudio:
 		deadline = time.monotonic() + 15
 
 		def lower():
-			if self.on or self.vdd_int_boot is None:
+			if self.armed or self.vdd_int_boot is None:
 				return False
 			try:
 				div = read_phys32(ABOX_CPU_DIV) & 0xf
@@ -374,6 +394,8 @@ def main():
 	def quit(*_):
 		if ca.on:
 			ca.stop()
+		if ca.armed:
+			ca.disarm()
 		loop.quit()
 	import signal
 	GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, quit)
