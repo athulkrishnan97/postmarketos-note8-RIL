@@ -1105,3 +1105,14 @@ the work below was done offline.)
   boot (minfree levels vs the whole phone's memory), plus no network (no
   policy routing in the kernel). The reboot at that time was manual.
 
+
+## 2026-10-13 ~17:45 WI-FI ICON MISSING WITH MOBILE DATA UP (FIXED)
+- Plasma showed the cellular icon while on Wi-Fi: postmarketOS's
+  50-wwan-policy.conf puts gsm routes in table 1430, and NetworkManager then
+  keeps "Mobile data" as its ActivatingConnection forever; plasma-nm shows
+  the activating connection ahead of the primary one.
+- /etc/NetworkManager/conf.d/60-wwan-main-table.conf (rootfs-addons) sets
+  route-table=0 for gsm: both default routes live in the main table, Wi-Fi
+  metric 600 wins over rmnet0 metric 700, mobile data takes over when Wi-Fi
+  drops. Applied live (nmcli general reload conf + con up "Mobile data");
+  ActivatingConnection is now "/" and the Wi-Fi icon shows.

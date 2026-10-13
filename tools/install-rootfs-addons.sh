@@ -107,6 +107,10 @@ install -D -m 644 \
 install -D -m 644 "$ADDONS/etc-nftables.d/50_waydroid.nft" "$MNT/etc/nftables.d/50_waydroid.nft"
 install -D -m 644 "$ADDONS/etc-NetworkManager-conf.d/waydroid.conf" \
 	"$MNT/etc/NetworkManager/conf.d/waydroid.conf"
+# Mobile data in the main routing table: with pmOS's route-table 1430 policy
+# NM reports it as "activating" while Wi-Fi is up and Plasma hides the Wi-Fi icon
+install -D -m 644 "$ADDONS/etc-NetworkManager-conf.d/60-wwan-main-table.conf" \
+	"$MNT/etc/NetworkManager/conf.d/60-wwan-main-table.conf"
 # Call audio (earpiece and mics while a call is up); enable it together
 # with the modem: rc-update add callaudio default
 TOOLS="$ADDONS/../tools"
