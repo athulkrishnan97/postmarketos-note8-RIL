@@ -207,6 +207,7 @@ class CallAudio:
 		self.bus = bus
 		self.calls = {}		# call path -> state
 		self.snd_sent = set()	# calls that got the SND setup
+		self.answered = set()	# calls that have been active
 		self.armed = False	# call DMAs started, VDD_INT raised
 		self.on = False		# codec routed, streams running
 		self.saved = []
@@ -249,19 +250,27 @@ class CallAudio:
 		if int(new) == TERMINATED:
 			self.calls.pop(path, None)
 			self.snd_sent.discard(path)
+			self.answered.discard(path)
 		else:
 			self.calls[path] = int(new)
+			if int(new) == ACTIVE:
+				self.answered.add(path)
 		self.update()
 
 	def call_deleted(self, path):
 		self.calls.pop(str(path), None)
 		self.snd_sent.discard(str(path))
+		self.answered.discard(str(path))
 		self.update()
 
 	def update(self):
 		states = self.calls.values()
 		arm = any(s in ARM_STATES for s in states)
-		audio = any(s in AUDIO_STATES for s in states)
+		# an answered call can briefly report ringing-in again (seen with
+		# CS fallback from LTE); keep its audio up
+		audio = any(s in AUDIO_STATES or
+			    (s == RINGING_IN and p in self.answered)
+			    for p, s in self.calls.items())
 		if arm and not self.armed:
 			self.arm()
 		if audio and not self.on:

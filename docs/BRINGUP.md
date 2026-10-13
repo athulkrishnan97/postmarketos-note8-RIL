@@ -942,7 +942,7 @@ leftover from section 17, where it changed nothing); removed.
     both mics, incoming and outgoing, see the Call audio section. Still open:
     [ ] speakerphone (the dialer's speaker button does nothing) and wired
         headset audio in calls;
-    [ ] calls on LTE (CSFB) untested; the phone is set to 2G.
+    [x] calls on LTE: CS fallback works both ways (2026-10-13), see below.
 [ ] Spectacle's autostarted --dbus service busy-loops at ~80% CPU on this
     phone (heats it up). Autostart disabled for the user
     (~/.config/autostart/spectacle.desktop, Hidden=true).
@@ -1375,4 +1375,12 @@ Debugging traps:
   is ignored.
 - At 3G with weak signal (under ~20%) calls failed to connect on their own;
   2G was reliable.
+
+CS fallback (2026-10-13): with 2g|3g|4g allowed the modem camps on LTE and
+the network (eir) pages it there for incoming calls; the CP falls back to
+GSM by itself, for outgoing calls too (LTE -> GSM within ~2 s of dialing,
+active ~8 s in), and returns to LTE within ~2 s of hang-up. LTE data works
+again afterwards. Nothing on the AP side is involved. One quirk: right after
+answering, the call reported active -> ringing-in -> active; callaudio keeps
+an answered call's audio up through that.
 

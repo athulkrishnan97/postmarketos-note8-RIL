@@ -1052,4 +1052,8 @@ the work below was done offline.)
   call answered in the dialer then had no uplink: callaudio started the
   call DMAs only at answer. Now armed while ringing (c5b5a07); user-tested
   incoming and outgoing after the fix: both ways fine.
+- ~15:40: network mode back to 2g|3g|4g. CS fallback from LTE works for
+  incoming (user-tested, audio both ways) and outgoing calls; LTE data back
+  after each call. callaudio no longer drops audio when an answered call
+  briefly reports ringing-in again.
 
