@@ -307,13 +307,10 @@ class CallAudio:
 		log("call path armed")
 		self.armed = True
 		self.boost(True)
-		write_sysfs(ABOX_CALL, "1")
-		GLib.timeout_add_seconds(10, self.watchdog)
 
 	def disarm(self):
 		log("call path disarmed")
 		self.armed = False
-		write_sysfs(ABOX_CALL, "0")
 		self.boost(False)
 
 	def start(self):
@@ -325,6 +322,10 @@ class CallAudio:
 			amixer_set(n, v)
 		self.start_stream("playback", 5)
 		self.start_stream("capture", 5)
+		# after the streams: opening hw:0,0 sets up UAIF0 and the mixer, and
+		# with the call DMAs started first the downlink stays all zeros
+		write_sysfs(ABOX_CALL, "1")
+		GLib.timeout_add_seconds(10, self.watchdog)
 
 	def start_stream(self, kind, tries):
 		if not self.on:
@@ -361,6 +362,7 @@ class CallAudio:
 	def stop(self):
 		log("call audio off")
 		self.on = False
+		write_sysfs(ABOX_CALL, "0")
 		for p in self.streams.values():
 			p.terminate()
 		for p in self.streams.values():
