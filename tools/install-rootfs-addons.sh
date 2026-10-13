@@ -54,6 +54,9 @@ install -m 644 "$ADDONS/firmware/calliope_sram.bin" "$ADDONS/firmware/calliope_d
 mkdir -p "$MNT/usr/share/alsa/ucm2"
 cp -a "$ADDONS/usr-share-alsa-ucm2/." "$MNT/usr/share/alsa/ucm2/"
 # PulseAudio: start on the bottom speaker, not the last saved default
+# Codec mic supply before the codec (see the file)
+install -D -m 644 "$ADDONS/etc-modprobe.d/greatlte-audio.conf" \
+	"$MNT/etc/modprobe.d/greatlte-audio.conf"
 install -D -m 644 "$ADDONS/etc-pulse-default.pa.d/greatlte-speaker.pa" \
 	"$MNT/etc/pulse/default.pa.d/greatlte-speaker.pa"
 # ...and again after login: callaudiod makes the card's first sink (Earpiece) default
@@ -89,5 +92,11 @@ install -D -m 644 "$ADDONS/etc-udev-rules.d/61-greatlte-modem.rules" \
 	"$MNT/etc/udev/rules.d/61-greatlte-modem.rules"
 install -D -m 644 "$ADDONS/etc-udev-rules.d/78-greatlte-mm.rules" \
 	"$MNT/etc/udev/rules.d/78-greatlte-mm.rules"
+# Call audio (earpiece and mics while a call is up); enable it together
+# with the modem: rc-update add callaudio default
+TOOLS="$ADDONS/../tools"
+install -D -m 755 "$TOOLS/callaudio/callaudio" "$MNT/usr/local/sbin/callaudio"
+install -m 755 "$TOOLS/callaudio/callaudio.initd" "$MNT/etc/init.d/callaudio"
+install -D -m 644 "$TOOLS/callaudio/callaudio.confd" "$MNT/etc/conf.d/callaudio"
 
 echo "addons installed into $IMG"

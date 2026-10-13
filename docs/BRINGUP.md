@@ -938,10 +938,11 @@ leftover from section 17, where it changed nothing); removed.
     corners; video dimmed). Workaround GSK_RENDERER=cairo per app (MFC
     section) costs ~5x CPU on video. Find the Mesa bug (suspect: GTK's
     per-instance vertex data reads as zero), patch, rebuild Mesa.
-[ ] TO FIX (parked 2026-10-12): call audio. Calls connect and stay up (2G;
-    CP voice firmware VSS runs on the ABOX with the module from
-    tools/modem/wip, gear capped at 590 MHz), but the downlink is digital
-    silence and the mics are not routed. Notes: tools/modem/wip/README.md.
+[x] Call audio (2026-10-13, kernel 7.0-r17 + tools/callaudio): earpiece and
+    both mics, incoming and outgoing, see the Call audio section. Still open:
+    [ ] speakerphone (the dialer's speaker button does nothing) and wired
+        headset audio in calls;
+    [ ] calls on LTE (CSFB) untested; the phone is set to 2G.
 [ ] Spectacle's autostarted --dbus service busy-loops at ~80% CPU on this
     phone (heats it up). Autostart disabled for the user
     (~/.config/autostart/spectacle.desktop, Hidden=true).
@@ -1312,3 +1313,62 @@ inhibitor, an SSH session, a configured USB host connection (development;
 
 Debug knobs now built in: `CONFIG_PM_DEBUG`/`PM_SLEEP_DEBUG`
 (`/sys/power/pm_test`, `pm_print_times`, `pm_wakeup_irq`).
+
+## Call audio: VSS, earpiece and mics (kernel 7.0-r17, 2026-10-13)
+
+Calls have audio both ways in the earpiece, with plasma-dialer and any other
+ModemManager client. Pieces:
+
+- Kernel (exynos8895-call-audio.patch):
+  - ABOX maps the modem's VSS memory (CP reserved memory after the CP image,
+    0xfc600000, 6 MiB) into the Calliope firmware's VSS window. The firmware
+    starts VSS by itself when it boots after the CP.
+  - "call" attribute: starts RDMA4 (downlink) and WDMA2 (uplink) as PCM
+    tasks, routed RDMA4 -> mixer (SIFS0) -> UAIF0 and UAIF0 -> NSRC1 -> WDMA2,
+    as the stock HAL's call PCMs. VSS takes them over about 1 s after the
+    call connects ("VHM_EstablishCall" in the firmware log, fw_log=1).
+  - gear_min (default 2): caps the ABOX's Cortex-A7 at 590 MHz. VSS asks for
+    gear 1 (1.18 GHz) at call setup; at the boot VDD_INT (644 mV) that hangs
+    the firmware and the CP crashes ~20 s into the call.
+  - Machine driver: "Main Mic" (IN3L, the IN1AR pins, MICBIAS1A) and "Sub Mic"
+    (IN2L, the IN2AL pins, MICBIAS1B), as in the stock DT routing.
+  - CONFIG_REGULATOR_ARIZONA_MICSUPP=m: without it the codec's MICVDD is a
+    dummy regulator, the mic charge pump stays off (reg 0x200 bit 0) and the
+    DMICs read a constant -32768. It has to load before the codec
+    (softdep in /etc/modprobe.d/greatlte-audio.conf).
+- Userspace, tools/callaudio (OpenRC service): while a call is dialing,
+  ringing out, active or held it
+  - suspends PulseAudio's devices on the card (they hold hw:0,0);
+  - routes AIF1RX1 -> HPOUT3L -> OUT3 demux HPOUT4 (earpiece, mono
+    differential) and IN3L/IN2L (digital, OSR 3.072 MHz) -> AIF1TX1/2;
+  - runs a silent playback and a discarded capture on hw:0,0, which keep
+    UAIF0 and the codec's AIF1 clocked;
+  - writes the call attribute and, once the call is active, sends the stock
+    HAL's IPC SND setup through mifmon;
+  - raises VDD_INT (S2MPS17 BUCK4, B4OUT 0x20 on the SPEEDY bus: 0x37 =
+    644 mV -> 0x50 = 800 mV) and sets gear_min=1. At 590 MHz the far end
+    hears the uplink choppy (short dropouts; the uplink's software ASRC and
+    noise suppression run on the A7). At 800 mV gear 1 is stable.
+  When the last call ends it restores the mixer controls and PulseAudio,
+  sets gear_min=2 and lowers VDD_INT once the A7 divider
+  (CMU 0x13e01820) shows it has left gear 1.
+- Levels: earpiece -12 dB (HPOUT3 Digital Volume 104), mics +12 dB (152;
+  stock uses +6 dB with its own VSS tuning).
+
+What was not needed: the stock tuning files (AP_AUDIO_SLSI.bin and friends),
+the L2C handshake, the firmware component controls ("OEM", "ERAP info") and
+the CSA0 firmware; the CQK0 firmware on the phone works. The SND commands
+make no audible difference but match the stock HAL.
+
+Debugging traps:
+- The downlink seemed silent because the test recorded before VSS was
+  established, and later because enabling fw_log mid-call flushed a stale
+  "VHM_EstablishCall".
+- Recording the mixer output during a call (ROUTE_CTRL1 NSRC0 <- SIFS0,
+  0x13e50044 = 0x81) distorts what the earpiece plays, although the
+  recording itself is clean. The same audio played from a file is clean.
+- The earpiece is HPOUT4 in mono mode (cirrus,out-mono): HPOUT3R's input
+  is ignored.
+- At 3G with weak signal (under ~20%) calls failed to connect on their own;
+  2G was reliable.
+

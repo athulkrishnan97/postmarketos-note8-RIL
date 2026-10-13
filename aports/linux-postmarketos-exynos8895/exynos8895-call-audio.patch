@@ -1,24 +1,30 @@
---- a/sound/soc/samsung/abox/abox.h
-+++ b/sound/soc/samsung/abox/abox.h
-@@ -104,6 +104,10 @@
- 		u32 gear;
- 	} gear_req[8];			/* A7 clock requests from the firmware */
- 
-+	/* The modem's voice firmware (VSS), run by the Calliope firmware */
-+	bool vss_mapped;		/* its memory is mapped */
-+	bool vss_wanted;		/* start it whenever the firmware boots */
-+
- 	/* PCM side: DMA interrupts and IPC replies other than system ones */
- 	void *pcm;
- 	void (*dma_irq)(void *priv, unsigned int id,
-@@ -116,6 +120,7 @@
- 		  size_t size);
- void *abox_iova_to_virt(struct abox_data *data, u32 iova);
- int abox_pcm_register(struct abox_data *data);
-+int abox_pcm_call(struct abox_data *abox, bool on);
- void abox_uaif_clk_enable(struct abox_data *data, unsigned int id,
- 			  bool external_bclk);
- int abox_uaif_set_bclk(struct abox_data *data, unsigned int id,
+From: Athul <athulkrishnan97@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 14:00:00 +0100
+Subject: [PATCH] ASoC: samsung: abox, exynos8895: voice call audio
+
+The CP's voice processing (VSS) runs on the ABOX's Calliope firmware:
+
+- Map the modem's VSS memory (CP reserved memory, right after the CP
+  image) into the firmware's VSS window instead of the dummy page.
+  With the dummy page the firmware cannot run VSS and the CP crashes
+  shortly into a call.
+- Add the "call" attribute, which starts the "call" RDMA4 (downlink)
+  and WDMA2 (uplink) as PCM tasks, as the stock HAL's call PCMs do,
+  routed RDMA4 -> mixer -> UAIF0 and UAIF0 -> NSRC1 -> WDMA2. VSS takes
+  them over once the call is established. Userspace (callaudio) keeps
+  the codec interface running meanwhile.
+- Cap the A7 at gear 2 (590 MHz) by default (gear_min): VSS asks for
+  gear 1 (1.18 GHz) at call setup, which hangs the firmware at the boot
+  VDD_INT. callaudio raises VDD_INT and allows gear 1 during calls, which
+  the uplink needs (choppy otherwise).
+- fw_log: print the firmware's log.
+- Machine driver: the two digital mics, main on IN3L (IN1AR pins,
+  MICBIAS1A) and second on IN2L (IN2AL pins, MICBIAS1B), as stock, with
+  pin switches. They also need CONFIG_REGULATOR_ARIZONA_MICSUPP for
+  MICVDD.
+---
+diff --git a/sound/soc/samsung/abox/abox.c b/sound/soc/samsung/abox/abox.c
+index 8c2188f..902a70f 100644
 --- a/sound/soc/samsung/abox/abox.c
 +++ b/sound/soc/samsung/abox/abox.c
 @@ -24,6 +24,7 @@
@@ -29,18 +35,18 @@
  #include <linux/of_platform.h>
  #include <linux/of_reserved_mem.h>
  #include <linux/platform_device.h>
-@@ -256,6 +257,10 @@
+@@ -256,6 +257,10 @@ void *abox_iova_to_virt(struct abox_data *data, u32 iova)
  	return NULL;
  }
  
 +static bool fw_log;
 +module_param(fw_log, bool, 0644);
-+MODULE_PARM_DESC(fw_log, "Print the firmware's log (bring-up)");
++MODULE_PARM_DESC(fw_log, "Print the firmware's log");
 +
  static void abox_log_flush(struct abox_data *data)
  {
  	struct abox_log_buffer *log = data->log;
-@@ -282,7 +287,9 @@
+@@ -282,7 +287,9 @@ static void abox_log_flush(struct abox_data *data)
  			line[n++] = c;
  		}
  		line[n] = '\0';
@@ -51,23 +57,25 @@
  			dev_dbg(data->dev, "fw: %s\n", line);
  	}
  	WRITE_ONCE(log->index_reader, r);
-@@ -304,6 +311,15 @@
+@@ -304,6 +311,17 @@ static void abox_log_work(struct work_struct *work)
   * the new rate to be confirmed. Requests are tracked per requester id and
   * the fastest one wins.
   */
 +/*
 + * Gear 1 is the PLL rate itself (1.18 GHz), asked for by the voice firmware
-+ * at call setup. Downstream raises the INT bus QoS with it, which we don't
-+ * have; bring-up knob to cap the clock.
++ * at call setup. Downstream raises VDD_INT (INT bus QoS) with it; at the
++ * boot VDD_INT the A7 hangs at gear 1, so cap it at gear 2 (590 MHz) unless
++ * userspace has raised VDD_INT (callaudio does for calls, where the uplink
++ * processing needs gear 1).
 + */
-+static unsigned int gear_min = 1;
++static unsigned int gear_min = 2;
 +module_param(gear_min, uint, 0644);
-+MODULE_PARM_DESC(gear_min, "Fastest CPU gear allowed (1 = PLL rate)");
++MODULE_PARM_DESC(gear_min, "Fastest A7 gear allowed (1 = PLL rate, needs raised VDD_INT)");
 +
  static void abox_change_gear(struct abox_data *data, u32 gear, u32 id)
  {
  	struct abox_ipc_msg msg = {
-@@ -329,7 +345,7 @@
+@@ -329,7 +347,7 @@ static void abox_change_gear(struct abox_data *data, u32 gear, u32 id)
  		if (data->gear_req[i].id && data->gear_req[i].gear &&
  		    data->gear_req[i].gear < best)
  			best = data->gear_req[i].gear;
@@ -76,7 +84,7 @@
  
  	writel(best - 1, data->cmu + CMU_DIV_CLK_ABOX_PLL);
  	rate = AUD_PLL_RATE_HZ / best;
-@@ -496,12 +512,52 @@
+@@ -496,12 +514,52 @@ static int abox_map(struct abox_data *data, unsigned long iova,
  	return ret;
  }
  
@@ -129,7 +137,7 @@
  	int ret;
  
  	ret = of_reserved_mem_region_to_resource(dev->of_node, 0, &res);
-@@ -568,13 +624,23 @@
+@@ -568,13 +626,23 @@ static int abox_setup_memory(struct abox_data *data)
  		ret = abox_map(data, CHIPID_BASE, data->scratch_phys, SZ_4K,
  			       IOMMU_READ);
  	/*
@@ -159,73 +167,14 @@
  	     iova += SZ_4K)
  		ret = abox_map(data, iova, data->scratch_phys + SZ_4K, SZ_4K,
  			       prot);
-@@ -627,6 +693,35 @@
- 	return 0;
+@@ -751,12 +819,30 @@ static ssize_t state_show(struct device *dev, struct device_attribute *attr,
  }
+ 
  
 +/*
-+ * The CP's voice path runs on the Calliope firmware: once cbd has loaded
-+ * VSS and started the CP, the firmware has to be told to start it (and again
-+ * after every boot of the firmware). Without it the CP crashes a few seconds
-+ * into a call. The modem side asks through the start_vss attribute.
++ * Start/stop the voice call DMAs; userspace (callaudio) does it while a call
++ * needs audio, with the codec interface kept running by open streams.
 + */
-+static bool vss;
-+module_param(vss, bool, 0644);
-+MODULE_PARM_DESC(vss, "Start the modem's voice firmware when asked (bring-up)");
-+
-+static void abox_start_vss(struct abox_data *data)
-+{
-+	void __iomem *ack = data->sram + IPC_TX_ACK_OFFSET;
-+	int ret, ms;
-+
-+	if (!data->vss_mapped || !vss)
-+		return;
-+	ret = abox_ipc_system(data, ABOX_START_VSS, 0, 0, 0);
-+	/* the firmware may take longer than the usual 1 ms to take it */
-+	for (ms = 0; ret == -ETIMEDOUT && readl(ack) && ms < 200; ms++)
-+		msleep(1);
-+	if (ret == -ETIMEDOUT && !readl(ack))
-+		ret = 0;
-+	if (ret)
-+		dev_warn(data->dev, "start VSS IPC failed: %d\n", ret);
-+	else
-+		dev_info(data->dev, "VSS started (ack after ~%d ms)\n", ms);
-+}
-+
- int abox_boot(struct abox_data *data)
- {
- 	struct device *dev = data->dev;
-@@ -717,6 +812,8 @@
- 	}
- 	if (ret)
- 		dev_warn(dev, "resume IPC failed: %d\n", ret);
-+	if (data->vss_wanted)
-+		abox_start_vss(data);
- 	goto out;
- 
- fail:
-@@ -751,12 +848,46 @@
- }
- 
- 
-+static ssize_t start_vss_store(struct device *dev,
-+			       struct device_attribute *attr,
-+			       const char *buf, size_t count)
-+{
-+	struct abox_data *data = dev_get_drvdata(dev);
-+	int ret = 0;
-+
-+	if (!data->vss_mapped)
-+		return -ENODEV;
-+	data->vss_wanted = true;
-+	if (data->state == ABOX_STATE_RUNNING)
-+		abox_start_vss(data);
-+	else
-+		ret = abox_boot(data);	/* starts VSS once it is up */
-+	return ret ? ret : count;
-+}
-+
-+/* bring-up: start/stop the voice call DMAs by hand */
 +static ssize_t call_store(struct device *dev, struct device_attribute *attr,
 +			  const char *buf, size_t count)
 +{
@@ -241,19 +190,41 @@
  static DEVICE_ATTR_WO(boot);
  static DEVICE_ATTR_RO(state);
 +static DEVICE_ATTR_WO(call);
-+static DEVICE_ATTR_WO(start_vss);
  
  static struct attribute *abox_attrs[] = {
  	&dev_attr_boot.attr,
  	&dev_attr_state.attr,
-+	&dev_attr_start_vss.attr,
 +	&dev_attr_call.attr,
  	NULL
  };
  ATTRIBUTE_GROUPS(abox);
+diff --git a/sound/soc/samsung/abox/abox.h b/sound/soc/samsung/abox/abox.h
+index 3cc33d0..26f1596 100644
+--- a/sound/soc/samsung/abox/abox.h
++++ b/sound/soc/samsung/abox/abox.h
+@@ -104,6 +104,9 @@ struct abox_data {
+ 		u32 gear;
+ 	} gear_req[8];			/* A7 clock requests from the firmware */
+ 
++	/* The modem's voice firmware (VSS), run by the Calliope firmware */
++	bool vss_mapped;		/* its memory is mapped */
++
+ 	/* PCM side: DMA interrupts and IPC replies other than system ones */
+ 	void *pcm;
+ 	void (*dma_irq)(void *priv, unsigned int id,
+@@ -116,6 +119,7 @@ int abox_ipc_send(struct abox_data *data, const struct abox_ipc_msg *msg,
+ 		  size_t size);
+ void *abox_iova_to_virt(struct abox_data *data, u32 iova);
+ int abox_pcm_register(struct abox_data *data);
++int abox_pcm_call(struct abox_data *abox, bool on);
+ void abox_uaif_clk_enable(struct abox_data *data, unsigned int id,
+ 			  bool external_bclk);
+ int abox_uaif_set_bclk(struct abox_data *data, unsigned int id,
+diff --git a/sound/soc/samsung/abox/abox_pcm.c b/sound/soc/samsung/abox/abox_pcm.c
+index 86c5ad9..9efa417 100644
 --- a/sound/soc/samsung/abox/abox_pcm.c
 +++ b/sound/soc/samsung/abox/abox_pcm.c
-@@ -89,6 +89,8 @@
+@@ -89,6 +89,8 @@ enum {
  	ABOX_DMA_PLAYBACK,
  	ABOX_DMA_CAPTURE,
  	ABOX_DMA_SPEAKER,
@@ -262,7 +233,7 @@
  	ABOX_DMA_NUM,
  };
  
-@@ -397,6 +399,105 @@
+@@ -397,6 +399,105 @@ static int abox_pcm_mmap(struct snd_soc_component *component,
  			       vma->vm_end - vma->vm_start, vma->vm_page_prot);
  }
  
@@ -368,7 +339,7 @@
  /* UAIF DAIs */
  
  static int abox_uaif_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
-@@ -708,6 +809,22 @@
+@@ -708,6 +809,22 @@ int abox_pcm_register(struct abox_data *abox)
  		.ipcid = IPC_PCMPLAYBACK,
  		.irq = RDMA0_BUF_EMPTY + SPK_RDMA,
  	};
@@ -391,3 +362,39 @@
  	pcm->dma[ABOX_DMA_CAPTURE] = (struct abox_dma) {
  		.id = CAP_WDMA,
  		.iova = 0x82000000 + CAP_WDMA * SZ_1M,	/* WDMAx buffer */
+diff --git a/sound/soc/samsung/exynos8895_madera.c b/sound/soc/samsung/exynos8895_madera.c
+index 610ec1f..093dc62 100644
+--- a/sound/soc/samsung/exynos8895_madera.c
++++ b/sound/soc/samsung/exynos8895_madera.c
+@@ -168,6 +168,8 @@ static const struct snd_soc_dapm_widget exynos8895_madera_widgets[] = {
+ 	SND_SOC_DAPM_HP("Headphone", NULL),
+ 	SND_SOC_DAPM_SPK("Earpiece", NULL),
+ 	SND_SOC_DAPM_SPK("Speaker", NULL),
++	SND_SOC_DAPM_MIC("Main Mic", NULL),
++	SND_SOC_DAPM_MIC("Sub Mic", NULL),
+ };
+ 
+ static const struct snd_soc_dapm_route exynos8895_madera_routes[] = {
+@@ -177,6 +179,13 @@ static const struct snd_soc_dapm_route exynos8895_madera_routes[] = {
+ 	{ "Earpiece", NULL, "HPOUT3R" },
+ 	{ "Earpiece", NULL, "HPOUT4L" },
+ 	{ "Earpiece", NULL, "HPOUT4R" },
++	/* digital mics: main on IN3L (IN1AR pins), second on IN2L (IN2AL pins) */
++	{ "Main Mic", NULL, "MICBIAS1A" },
++	{ "IN1ARN", NULL, "Main Mic" },
++	{ "IN1ARP", NULL, "Main Mic" },
++	{ "Sub Mic", NULL, "MICBIAS1B" },
++	{ "IN2ALN", NULL, "Sub Mic" },
++	{ "IN2ALP", NULL, "Sub Mic" },
+ };
+ 
+ 
+@@ -184,6 +193,8 @@ static const struct snd_kcontrol_new exynos8895_madera_controls[] = {
+ 	SOC_DAPM_PIN_SWITCH("Headphone"),
+ 	SOC_DAPM_PIN_SWITCH("Earpiece"),
+ 	SOC_DAPM_PIN_SWITCH("Speaker"),
++	SOC_DAPM_PIN_SWITCH("Main Mic"),
++	SOC_DAPM_PIN_SWITCH("Sub Mic"),
+ };
+ 
+ SND_SOC_DAILINK_DEFS(codec,

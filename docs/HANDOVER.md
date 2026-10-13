@@ -1023,3 +1023,28 @@ the work below was done offline.)
   bootshim, both unused since Oct 2/10); that image was deleted unflashed.
 - Open: user test of call/SMS wake and unplugged drain; PowerDevil screen-off
   (disabled by the user's config) and its logind auto-suspend; see BRINGUP TODO.
+
+## 2026-10-13 ~14:00 CALL AUDIO WORKS (EARPIECE + MICS), PACKAGED AS r17
+- User-tested: incoming and outgoing calls with plasma-dialer, both ways
+  clear ("sounds perfect"), on 2G. Details: BRINGUP "Call audio".
+- Phone (still kernel #15 / v201) has, from the laptop tree:
+  - snd-soc-samsung-abox.ko = r17 call-audio version (installed, takes effect
+    at the next boot; the running one is the bring-up build, saved as
+    /root/snd-soc-samsung-abox.ko.bringup-2026-10-13);
+  - exynos8895_madera.ko with the mic widgets (original:
+    /root/exynos8895_madera.ko.orig);
+  - arizona-micsupp.ko (new) and /etc/modprobe.d/greatlte-audio.conf
+    (softdep); /etc/modprobe.d/abox-vss.conf = gear_min=2 (components=0
+    dropped: the parameter no longer exists).
+  - callaudio installed and enabled (/var/log/callaudio.log).
+  - Network mode 2G only (3G was forced for a test; calls failed at weak
+    signal). fw_log off. CQK0 firmware in /lib/firmware; the stock tuning
+    files are unused, kept in /root/abox-ext-bins.
+- Laptop: linux-7.0-ril has CONFIG_REGULATOR_ARIZONA_MICSUPP=m and the r17
+  sound files; the bring-up versions are in
+  ~/postmarketos/work/sound-bringup-backup/sound-2026-10-13.tar.
+- Verified: the r17 patch series applies to the 028ef9c tarball and gives
+  sound files byte-identical to the laptop tree; config survives olddefconfig.
+- Open: a reboot to confirm module load order (micsupp before the codec) and
+  callaudio at boot; speakerphone; headset; LTE calls.
+

@@ -1221,10 +1221,12 @@ static int call_at(const char *cmd)
 
 /*
  * The CP's voice firmware (VSS) runs on the audio DSP (ABOX). cbd loads it
- * before starting the CP; at every CP power-up the ABOX driver is asked to
- * start it (its start_vss attribute, which boots the DSP first if needed).
- * Without it the CP crashes a few seconds into a call. In a child: booting
- * the DSP takes a while and the CP's start-up file requests cannot wait.
+ * before starting the CP, and the DSP firmware starts it by itself when it
+ * boots with the CP online. Bring-up ABOX modules had a start_vss attribute
+ * (boot the DSP, send ABOX_START_VSS, which this firmware turned out not to
+ * know); the packaged driver has none, so this is a no-op there. In a
+ * child: booting the DSP takes a while and the CP's start-up file requests
+ * cannot wait.
  */
 static void vss_start(void)
 {
