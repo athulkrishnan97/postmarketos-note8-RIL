@@ -10,3 +10,9 @@
 
 # Send the stock HAL's sound setup to the CP when a call goes active (1/0)
 #SEND_SND=1
+
+# VDD_INT (S2MPS17 BUCK4 selector, 300 mV + 6.25 mV/step) during calls, so
+# the ABOX's A7 can run at the 1.18 GHz the voice firmware asks for; restored
+# afterwards. 0x50 = 800 mV (boot value 0x37 = 644 mV)
+#VDD_INT_CALL=0x50
+#PMIC_BUS=5

@@ -18,10 +18,16 @@
 #     attribute
 #   - once a call is active, sends the stock HAL's sound setup to the CP
 #     through mifmon (IPC SND: path handset, volume, mode, unmute)
-# and undoes all of it when the last call ends.
+#   - raises VDD_INT and lets the ABOX's Cortex-A7 run at gear 1 (1.18 GHz),
+#     which VSS asks for at call setup: at the 590 MHz gear-2 cap the uplink
+#     (software ASRC and noise suppression on the A7) comes out choppy, and
+#     at the boot VDD_INT (644 mV) gear 1 hangs the firmware
+# and undoes all of it when the last call ends. VDD_INT goes back down only
+# once the A7 has left gear 1 (VSS drops it when the call is released).
 #
 # Settings: /etc/conf.d/callaudio. Log: /var/log/callaudio.log.
 
+import mmap
 import os
 import pwd
 import subprocess
@@ -36,6 +42,9 @@ CARD = "0"
 PCM = "hw:0,0"
 ABOX_CALL = "/sys/bus/platform/drivers/samsung-abox/13e50000.audio-controller/call"
 MIFMON_CTL = "/run/mifmon.ctl"
+GEAR_MIN = "/sys/module/snd_soc_samsung_abox/parameters/gear_min"
+# ABOX A7 clock divider (CMU_DIV_CLK_ABOX_PLL): A7 = PLL_AUD / (n + 1)
+ABOX_CPU_DIV = 0x13e01820
 LOG = "/var/log/callaudio.log"
 
 # HPOUT3 Digital Volume: 0.5 dB steps, 128 = 0 dB, limited to 116 (-6 dB)
@@ -43,6 +52,10 @@ EARPIECE_VOLUME = os.environ.get("EARPIECE_VOLUME") or "104"
 # IN2L/IN3L Digital Volume: 0.5 dB steps, 128 = 0 dB (stock: 140, +6 dB)
 MIC_VOLUME = os.environ.get("MIC_VOLUME") or "152"
 SEND_SND = (os.environ.get("SEND_SND") or "1") == "1"
+# VDD_INT is S2MPS17 BUCK4 (B4OUT 0x20, page 0x01 on the SPEEDY bus):
+# 300 mV + 6.25 mV/step; boot value 0x37 = 644 mV, 0x50 = 800 mV
+PMIC_BUS = os.environ.get("PMIC_BUS") or "5"
+VDD_INT_CALL = os.environ.get("VDD_INT_CALL") or "0x50"
 
 CONTROLS = [
 	("OUT3 Demux", "HPOUT4"),
@@ -156,6 +169,26 @@ def mifmon_send(lines):
 		os.close(fd)
 
 
+def read_phys32(addr):
+	fd = os.open("/dev/mem", os.O_RDONLY | os.O_SYNC)
+	try:
+		pg = addr & ~0xfff
+		m = mmap.mmap(fd, 0x1000, mmap.MAP_SHARED, mmap.PROT_READ, offset=pg)
+		v = int.from_bytes(m[addr - pg:addr - pg + 4], "little")
+		m.close()
+		return v
+	finally:
+		os.close(fd)
+
+
+def vdd_int(value=None):
+	"""Read (and with value, first write) the BUCK4 voltage selector."""
+	if value is not None:
+		run(["i2cset", "-a", "-f", "-y", PMIC_BUS, "0x01", "0x20", value])
+	r = run(["i2cget", "-a", "-f", "-y", PMIC_BUS, "0x01", "0x20"])
+	return r.stdout.strip() if r.returncode == 0 else None
+
+
 def write_sysfs(path, value):
 	try:
 		with open(path, "w") as f:
@@ -172,6 +205,7 @@ class CallAudio:
 		self.on = False
 		self.saved = []
 		self.streams = {}
+		self.vdd_int_boot = None	# BUCK4 value to restore, while raised
 		bus.add_signal_receiver(self.state_changed, "StateChanged", CALL_IFACE,
 					MM, path_keyword="path")
 		bus.add_signal_receiver(self.call_deleted, "CallDeleted", VOICE_IFACE, MM)
@@ -234,6 +268,7 @@ class CallAudio:
 	def start(self):
 		log("call audio on")
 		self.on = True
+		self.boost(True)
 		pulse_suspend(True)
 		self.saved = [(n, amixer_get(n)) for n, _ in CONTROLS]
 		for n, v in CONTROLS:
@@ -292,6 +327,41 @@ class CallAudio:
 				amixer_set(n, v)
 		self.saved = []
 		pulse_suspend(False)
+		self.boost(False)
+
+	def boost(self, on):
+		"""VDD_INT up and A7 gear 1 allowed during calls."""
+		if on:
+			if self.vdd_int_boot is None:
+				self.vdd_int_boot = vdd_int()
+			got = vdd_int(VDD_INT_CALL)
+			if got is not None and int(got, 16) == int(VDD_INT_CALL, 16):
+				write_sysfs(GEAR_MIN, "1")
+				log(f"VDD_INT {self.vdd_int_boot} -> {got}, A7 gear 1 allowed")
+			else:
+				log(f"VDD_INT not raised ({got}), A7 stays capped at gear 2")
+			return
+		write_sysfs(GEAR_MIN, "2")
+		# lower the voltage only once the A7 has left gear 1 (divider 0)
+		deadline = time.monotonic() + 15
+
+		def lower():
+			if self.on or self.vdd_int_boot is None:
+				return False
+			try:
+				div = read_phys32(ABOX_CPU_DIV) & 0xf
+			except OSError as e:
+				log(f"A7 divider unreadable ({e}), VDD_INT stays raised")
+				return False
+			if div == 0:
+				if time.monotonic() < deadline:
+					return True
+				log("A7 still at gear 1, VDD_INT stays raised")
+				return False
+			log(f"A7 divider {div}, VDD_INT -> {vdd_int(self.vdd_int_boot)}")
+			self.vdd_int_boot = None
+			return False
+		GLib.timeout_add(500, lower)
 
 
 def main():

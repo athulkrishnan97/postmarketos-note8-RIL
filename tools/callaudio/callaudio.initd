@@ -6,7 +6,7 @@ command_background=true
 pidfile=/run/callaudio.pid
 
 start_pre() {
-	export EARPIECE_VOLUME MIC_VOLUME SEND_SND
+	export EARPIECE_VOLUME MIC_VOLUME SEND_SND VDD_INT_CALL PMIC_BUS
 }
 
 depend() {
