@@ -1384,3 +1384,24 @@ again afterwards. Nothing on the AP side is involved. One quirk: right after
 answering, the call reported active -> ringing-in -> active; callaudio keeps
 an answered call's audio up through that.
 
+## Waydroid (kernel 7.0-r20, 2026-10-13)
+
+LineageOS 20 runs in Waydroid with GPU rendering (Panfrost) and networking;
+setup in tools/waydroid/README.md. What it took on this phone:
+
+- Kernel: binder + binderfs, DMA-BUF heaps (r19), and Android's networking
+  needs (r20): IP_ADVANCED_ROUTER / IP(V6)_MULTIPLE_TABLES (without policy
+  routing netd has an address but no route: `ip rule` fails with "Operation
+  not supported"), the netd iptables matches/targets, raw tables, eBPF
+  (BPF_SYSCALL, CGROUP_BPF, cls/act bpf, xt_bpf), UDP diag + socket destroy.
+  Several of these change core structures and there is no MODVERSIONS, so
+  kernel and modules must come from one build.
+- Android's lmkd in its default minfree mode compares free memory minus a
+  large reserve against fixed levels and killed the launcher repeatedly at
+  boot with 2 GB available; PSI mode (ro.lmk.use_minfree_levels=false)
+  fixes it.
+- postmarketOS's nftables policy drops the container's DHCP/DNS and
+  forwarded traffic even though Waydroid's own lxc table accepts them (all
+  base chains on a hook must accept): rootfs-addons/etc-nftables.d.
+- NetworkManager otherwise grabs the container's veth.
+

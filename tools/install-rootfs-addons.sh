@@ -97,6 +97,11 @@ install -D -m 644 "$ADDONS/etc-udev-rules.d/78-greatlte-mm.rules" \
 install -D -m 644 \
 	"$ADDONS/usr-local-share-dbus-1-system-services/org.freedesktop.ModemManager1.service" \
 	"$MNT/usr/local/share/dbus-1/system-services/org.freedesktop.ModemManager1.service"
+# Waydroid: its bridge/veth past the default-drop firewall, and kept away
+# from NetworkManager (setup steps: tools/waydroid/README.md)
+install -D -m 644 "$ADDONS/etc-nftables.d/50_waydroid.nft" "$MNT/etc/nftables.d/50_waydroid.nft"
+install -D -m 644 "$ADDONS/etc-NetworkManager-conf.d/waydroid.conf" \
+	"$MNT/etc/NetworkManager/conf.d/waydroid.conf"
 # Call audio (earpiece and mics while a call is up); enable it together
 # with the modem: rc-update add callaudio default
 TOOLS="$ADDONS/../tools"

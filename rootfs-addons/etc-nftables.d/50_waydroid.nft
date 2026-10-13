@@ -1,0 +1,14 @@
+#!/usr/sbin/nft -f
+# Waydroid: the container's DHCP/DNS (dnsmasq on waydroid0) and its traffic
+# to the outside. Waydroid's own "inet lxc" table accepts these too, but the
+# default-drop policy here would still drop them.
+table inet filter {
+	chain input {
+		iifname "waydroid0" udp dport { domain, bootps } accept comment "Waydroid DHCP/DNS"
+		iifname "waydroid0" tcp dport domain accept comment "Waydroid DNS over TCP"
+	}
+	chain forward {
+		iifname "waydroid0" accept comment "Waydroid outgoing traffic"
+		oifname "waydroid0" ct state { established, related } accept comment "Waydroid replies"
+	}
+}

@@ -1085,3 +1085,23 @@ the work below was done offline.)
   The DECON now logs "CRTC enabled/disabled", so the next blank can be
   matched against both. GPU investigation pending.
 
+## 2026-10-13 ~17:20 WAYDROID RUNS (boot-v205, NEW MODULE TREE)
+- Phone runs boot-v205-androidnet.img (laptop work/) = kernel #19 from the
+  laptop tree: r18 DECON fixes + binder/binderfs + DMA-BUF heaps + Android
+  networking (policy routing, netd xt matches/targets, eBPF). These change
+  struct sock / struct nf_conn, so /lib/modules/7.0.0 was replaced by a full
+  modules_install from the same build (536 modules, incl. the call-audio and
+  mic modules that used to sit in kernel/extra-audio). Old tree:
+  /lib/modules/7.0.0.v204-backup. Rollback: flash boot-v204-binder.img and
+  move that tree back. Checked after boot: Plasma, audio card + mics, BT,
+  LTE data, firewall.
+- Waydroid: LineageOS 20 images in /etc/waydroid-extra/images (downloaded on
+  the laptop, work/waydroid/, sha256 checked), lmkd in PSI mode via
+  waydroid.cfg, firewall drop-in /etc/nftables.d/50_waydroid.nft,
+  /etc/NetworkManager/conf.d/waydroid.conf. Android boots in ~15 s, renders
+  on Panfrost, network VALIDATED. waydroid-container is NOT in the default
+  runlevel. Guide: tools/waydroid/README.md.
+- The earlier "Waydroid crashing": lmkd killing the launcher/services at
+  boot (minfree levels vs the whole phone's memory), plus no network (no
+  policy routing in the kernel). The reboot at that time was manual.
+
