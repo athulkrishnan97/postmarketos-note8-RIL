@@ -8,13 +8,11 @@ with any ModemManager voice client (plasma-dialer, gnome-calls).
 
 Needs:
 
-- the ABOX driver with the `call` attribute (tools/modem/wip/abox-vss.diff)
-- `CONFIG_REGULATOR_ARIZONA_MICSUPP=m`: without it the codec's MICVDD is a
-  dummy regulator, the mic charge pump stays off and the mics read a
-  constant -32768; load it before the codec
-  (`softdep snd_soc_cs47l92 pre: arizona-micsupp` in /etc/modprobe.d)
-- "Main Mic" (IN1AR pins -> IN3L, MICBIAS1A) and "Sub Mic" (IN2AL pins ->
-  IN2L, MICBIAS1B) widgets in the exynos8895_madera machine driver
+- kernel 7.0-r17 (exynos8895-call-audio.patch: the ABOX `call` attribute,
+  VSS memory, gear_min, the mic widgets; CONFIG_REGULATOR_ARIZONA_MICSUPP)
+- rootfs-addons/etc-modprobe.d/greatlte-audio.conf, which loads the mic
+  supply before the codec (otherwise the mics read a constant -32768)
+- i2c-tools (VDD_INT) and alsa-utils
 
 Install:
 
@@ -22,6 +20,9 @@ Install:
     install -m755 callaudio.initd /etc/init.d/callaudio
     install -m644 callaudio.confd /etc/conf.d/callaudio
     rc-update add callaudio default && rc-service callaudio start
+
+(tools/install-rootfs-addons.sh installs it into images; enable it with
+the modem.) Details: docs/BRINGUP.md, "Call audio".
 
 Levels: /etc/conf.d/callaudio. Log: `/var/log/callaudio.log`.
 
