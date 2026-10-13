@@ -215,6 +215,7 @@ class CallAudio:
 		self.vdd_int_boot = None	# BUCK4 value to restore, while raised
 		bus.add_signal_receiver(self.state_changed, "StateChanged", CALL_IFACE,
 					MM, path_keyword="path")
+		bus.add_signal_receiver(self.call_added, "CallAdded", VOICE_IFACE, MM)
 		bus.add_signal_receiver(self.call_deleted, "CallDeleted", VOICE_IFACE, MM)
 		bus.add_signal_receiver(self.mm_owner, "NameOwnerChanged",
 					"org.freedesktop.DBus", arg0=MM)
@@ -256,6 +257,22 @@ class CallAudio:
 			if int(new) == ACTIVE:
 				self.answered.add(path)
 		self.update()
+
+	def call_added(self, path):
+		# incoming calls are created ringing-in: no StateChanged until they
+		# are answered, too late to arm (VSS asks for its gear at setup)
+		path = str(path)
+		try:
+			props = dbus.Interface(self.bus.get_object(MM, path),
+					       "org.freedesktop.DBus.Properties")
+			state = int(props.Get(CALL_IFACE, "State"))
+		except dbus.DBusException as e:
+			log(f"{path}: added, state unknown ({e.get_dbus_name()})")
+			return
+		log(f"{path}: added, state {state}")
+		if state != TERMINATED:
+			self.calls[path] = state
+			self.update()
 
 	def call_deleted(self, path):
 		self.calls.pop(str(path), None)

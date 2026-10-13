@@ -16,7 +16,9 @@ The CP's voice processing (VSS) runs on the ABOX's Calliope firmware:
 - Cap the A7 at gear 2 (590 MHz) by default (gear_min): VSS asks for
   gear 1 (1.18 GHz) at call setup, which hangs the firmware at the boot
   VDD_INT. callaudio raises VDD_INT and allows gear 1 during calls, which
-  the uplink needs (choppy otherwise).
+  the uplink needs (choppy otherwise). Writing "call" re-applies the
+  firmware's gear requests, so a call it set up under the old cap still
+  gets gear 1.
 - fw_log: print the firmware's log.
 - Machine driver: the two digital mics, main on IN3L (IN1AR pins,
   MICBIAS1A) and second on IN2L (IN2AL pins, MICBIAS1B), as stock, with
@@ -24,7 +26,7 @@ The CP's voice processing (VSS) runs on the ABOX's Calliope firmware:
   MICVDD.
 ---
 diff --git a/sound/soc/samsung/abox/abox.c b/sound/soc/samsung/abox/abox.c
-index 8c2188f..902a70f 100644
+index 8c2188f..e8de897 100644
 --- a/sound/soc/samsung/abox/abox.c
 +++ b/sound/soc/samsung/abox/abox.c
 @@ -24,6 +24,7 @@
@@ -57,7 +59,7 @@ index 8c2188f..902a70f 100644
  			dev_dbg(data->dev, "fw: %s\n", line);
  	}
  	WRITE_ONCE(log->index_reader, r);
-@@ -304,6 +311,17 @@ static void abox_log_work(struct work_struct *work)
+@@ -304,6 +311,21 @@ static void abox_log_work(struct work_struct *work)
   * the new rate to be confirmed. Requests are tracked per requester id and
   * the fastest one wins.
   */
@@ -72,10 +74,27 @@ index 8c2188f..902a70f 100644
 +module_param(gear_min, uint, 0644);
 +MODULE_PARM_DESC(gear_min, "Fastest A7 gear allowed (1 = PLL rate, needs raised VDD_INT)");
 +
++/* gear_req is updated from the IPC handler and from the call attribute */
++static DEFINE_SPINLOCK(abox_gear_lock);
++
++/* id 0 records nothing: it re-applies the current requests (gear_min changed) */
  static void abox_change_gear(struct abox_data *data, u32 gear, u32 id)
  {
  	struct abox_ipc_msg msg = {
-@@ -329,7 +347,7 @@ static void abox_change_gear(struct abox_data *data, u32 gear, u32 id)
+@@ -312,9 +334,10 @@ static void abox_change_gear(struct abox_data *data, u32 gear, u32 id)
+ 	};
+ 	unsigned int i, slot = ARRAY_SIZE(data->gear_req), best = CPU_GEAR_MAX;
+ 	u64 ns = ktime_get_ns();
+-	unsigned long rate;
++	unsigned long rate, flags;
+ 
+-	for (i = 0; i < ARRAY_SIZE(data->gear_req); i++) {
++	spin_lock_irqsave(&abox_gear_lock, flags);
++	for (i = 0; id && i < ARRAY_SIZE(data->gear_req); i++) {
+ 		if (data->gear_req[i].id == id ||
+ 		    (!data->gear_req[i].id && slot == ARRAY_SIZE(data->gear_req)))
+ 			slot = i;
+@@ -329,9 +352,10 @@ static void abox_change_gear(struct abox_data *data, u32 gear, u32 id)
  		if (data->gear_req[i].id && data->gear_req[i].gear &&
  		    data->gear_req[i].gear < best)
  			best = data->gear_req[i].gear;
@@ -83,8 +102,11 @@ index 8c2188f..902a70f 100644
 +	best = clamp(best, max(gear_min, 1U), (unsigned int)CPU_GEAR_MAX);
  
  	writel(best - 1, data->cmu + CMU_DIV_CLK_ABOX_PLL);
++	spin_unlock_irqrestore(&abox_gear_lock, flags);
  	rate = AUD_PLL_RATE_HZ / best;
-@@ -496,12 +514,52 @@ static int abox_map(struct abox_data *data, unsigned long iova,
+ 	dev_dbg(data->dev, "CPU gear %u (request %u from %#x): %lu Hz\n", best,
+ 		gear, id, rate);
+@@ -496,12 +520,52 @@ static int abox_map(struct abox_data *data, unsigned long iova,
  	return ret;
  }
  
@@ -137,7 +159,7 @@ index 8c2188f..902a70f 100644
  	int ret;
  
  	ret = of_reserved_mem_region_to_resource(dev->of_node, 0, &res);
-@@ -568,13 +626,23 @@ static int abox_setup_memory(struct abox_data *data)
+@@ -568,13 +632,23 @@ static int abox_setup_memory(struct abox_data *data)
  		ret = abox_map(data, CHIPID_BASE, data->scratch_phys, SZ_4K,
  			       IOMMU_READ);
  	/*
@@ -167,7 +189,7 @@ index 8c2188f..902a70f 100644
  	     iova += SZ_4K)
  		ret = abox_map(data, iova, data->scratch_phys + SZ_4K, SZ_4K,
  			       prot);
-@@ -751,12 +819,30 @@ static ssize_t state_show(struct device *dev, struct device_attribute *attr,
+@@ -751,12 +825,36 @@ static ssize_t state_show(struct device *dev, struct device_attribute *attr,
  }
  
  
@@ -184,6 +206,12 @@ index 8c2188f..902a70f 100644
 +
 +	if (!ret)
 +		ret = abox_pcm_call(data, on);
++	/*
++	 * callaudio sets gear_min before this; a call the firmware already
++	 * set up (gear request answered under the old cap) gets its gear now
++	 */
++	if (!ret)
++		abox_change_gear(data, 0, 0);
 +	return ret ? ret : count;
 +}
 +

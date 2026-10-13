@@ -1142,3 +1142,19 @@ the work below was done offline.)
   (/etc/sudoers.d/waydroid-container), then execs /usr/bin/waydroid.
   Tested cold (container stopped, sudo -k): icon command -> Android ready in
   ~20 s. waydroid-container is in no runlevel.
+
+## 2026-10-13 ~19:10 NO CALL AUDIO ON INCOMING CALLS (FIXED, NOT WAYDROID)
+- Incoming call 19:05: VSS asked for 1200M at VHM_EstablishCall, the A7
+  stayed at 590 MHz (fw log: "GEAR CHANGED - freq: 589824000Hz"): callaudio
+  armed only at ACTIVE. ModemManager creates incoming calls already
+  RINGING_IN (CallAdded, no StateChanged), so the "arm at ringing" path never
+  ran and gear_min was still 2 when the firmware asked. The capped request is
+  not retried. The modem logged csdiag_mute_Info (no voice frames).
+- callaudio: handle CallAdded (installed on the phone, live).
+- Kernel r21 (exynos8895-call-audio.patch): writing "call" re-applies the
+  firmware's gear requests under the new gear_min (spinlock around gear_req).
+  Only snd-soc-samsung-abox.ko changed: built in the laptop tree and
+  installed into /lib/modules/7.0.0 (unstripped, works from next boot); the
+  v205 module is in /root/snd-soc-samsung-abox.ko.zst.v205. No boot image.
+- Debug aid: echo Y > /sys/module/snd_soc_samsung_abox/parameters/fw_log
+  prints the ABOX firmware log (VHM_EstablishCall, gear changes) to dmesg.
