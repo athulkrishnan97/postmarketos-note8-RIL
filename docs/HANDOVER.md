@@ -1074,3 +1074,14 @@ the work below was done offline.)
   see whether fbdev registration or the fbcon takeover hangs, and reboot
   warm (not via download mode) so console-ramoops survives.
 
+## 2026-10-13 ~16:15 DECON FLIP/IRQ FIXES FLASHED (boot-v203)
+- Phone runs boot-v203-deconfix.img (laptop work/) = v201 + aports
+  exynos8895-decon-flip-irq.patch (kernel #17; dtb unchanged, loglevel=4,
+  fbdev off). Boots fine; frame-start and frame-done IRQs at 60 Hz each,
+  0 unhandled. Rollback: boot-v201-mdmwake.img.
+- Plasma blanking reported by the user: no modeset or panel off/on in the
+  logs; the kernel log has Panfrost faults right after login (sched
+  timeouts, DATA_INVALID_FAULT, JOB_BUS_FAULT, page faults; Mali-G71 r0p0).
+  The DECON now logs "CRTC enabled/disabled", so the next blank can be
+  matched against both. GPU investigation pending.
+
