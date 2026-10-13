@@ -1,0 +1,3 @@
+# greatlte: let the wheel group start the Waydroid container from the
+# launcher (/usr/local/bin/waydroid) without a password
+%wheel ALL=(root) NOPASSWD: /usr/sbin/rc-service waydroid-container start

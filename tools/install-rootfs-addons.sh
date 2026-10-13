@@ -107,6 +107,11 @@ install -D -m 644 \
 install -D -m 644 "$ADDONS/etc-nftables.d/50_waydroid.nft" "$MNT/etc/nftables.d/50_waydroid.nft"
 install -D -m 644 "$ADDONS/etc-NetworkManager-conf.d/waydroid.conf" \
 	"$MNT/etc/NetworkManager/conf.d/waydroid.conf"
+# Waydroid on demand: the launcher entries start the container service
+# through this wrapper (no container at boot)
+install -D -m 755 "$ADDONS/usr-local-bin/waydroid" "$MNT/usr/local/bin/waydroid"
+install -D -m 440 "$ADDONS/etc-sudoers.d/waydroid-container" \
+	"$MNT/etc/sudoers.d/waydroid-container"
 # Mobile data in the main routing table: with pmOS's route-table 1430 policy
 # NM reports it as "activating" while Wi-Fi is up and Plasma hides the Wi-Fi icon
 install -D -m 644 "$ADDONS/etc-NetworkManager-conf.d/60-wwan-main-table.conf" \

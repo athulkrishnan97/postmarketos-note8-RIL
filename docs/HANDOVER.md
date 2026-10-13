@@ -1133,3 +1133,12 @@ the work below was done offline.)
 - Unrelated: two earlier "No region space mem map" aborts of
   app.morphe.manager:Patcher (ART failing to reserve its heap in that
   process) — the patcher's own process, not Waydroid.
+
+## 2026-10-13 ~18:40 WAYDROID STARTS FROM THE LAUNCHER AFTER A REBOOT
+- After a reboot the Waydroid icon did nothing: the session needs the root
+  container service, which had been started by hand. The user does not want
+  it at boot, so /usr/local/bin/waydroid (rootfs-addons) starts
+  waydroid-container on demand via a one-command sudoers rule
+  (/etc/sudoers.d/waydroid-container), then execs /usr/bin/waydroid.
+  Tested cold (container stopped, sudo -k): icon command -> Android ready in
+  ~20 s. waydroid-container is in no runlevel.

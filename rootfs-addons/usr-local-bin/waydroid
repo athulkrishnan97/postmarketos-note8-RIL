@@ -1,0 +1,12 @@
+#!/bin/sh
+# greatlte: start the Waydroid container service on demand, so tapping
+# Waydroid (or an Android app) in the launcher works without running the
+# container at boot. Everything else goes straight to the real waydroid.
+case "$1" in
+""|show-full-ui|first-launch|app|session)
+	[ "$1 $2" = "session stop" ] ||
+	rc-service -q waydroid-container status 2>/dev/null ||
+		sudo -n /usr/sbin/rc-service waydroid-container start >/dev/null 2>&1
+	;;
+esac
+exec /usr/bin/waydroid "$@"

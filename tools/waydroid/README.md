@@ -25,9 +25,12 @@ Setup:
    rootfs-addons/etc-NetworkManager-conf.d/waydroid.conf (NetworkManager must
    not manage waydroid0/veth*). After reloading nftables restart
    waydroid-container: the reload drops Waydroid's NAT table.
-5. `rc-service waydroid-container start` (or add it to the default
-   runlevel), then start "Waydroid" from the launcher or
-   `waydroid show-full-ui`.
+5. On-demand start: rootfs-addons/usr-local-bin/waydroid (first in PATH)
+   starts waydroid-container before UI/app/session commands, through
+   rootfs-addons/etc-sudoers.d/waydroid-container (wheel may run exactly
+   `rc-service waydroid-container start` without a password). The
+   container is not in any runlevel; tapping "Waydroid" or an Android app
+   in the launcher brings it up (~20 s to the Android UI).
 6. Deadlock fix (Android restarts by itself, "Waydroid crashed"): the
    vendor image's hwcomposer.waydroid.so holds its windowsMutex in
    keyboard_handle_enter while calling IWaydroidTask::setFocusedTask, which
