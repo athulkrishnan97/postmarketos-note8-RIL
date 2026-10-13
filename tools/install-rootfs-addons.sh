@@ -64,6 +64,11 @@ install -D -m 755 "$ADDONS/usr-libexec/greatlte-speaker-default" "$MNT/usr/libex
 install -D -m 644 "$ADDONS/etc-xdg-autostart/greatlte-speaker-default.desktop" \
 	"$MNT/etc/xdg/autostart/greatlte-speaker-default.desktop"
 
+# No volume-change feedback sound: it plays with the "event" role, and
+# postmarketOS's module-role-ducking then dips music by ~22 dB for its
+# length, which sounds like playback cutting out on every volume step
+install -D -m 644 "$ADDONS/etc-xdg/plasmaparc" "$MNT/etc/xdg/plasmaparc"
+
 # Charging: USB PD 9 V, per-source current limits, battery temperature
 install -m 755 "$ADDONS/etc-init.d/greatlte-charging" "$MNT/etc/init.d/greatlte-charging"
 install -D -m 755 "$ADDONS/usr-libexec/greatlte-charging" "$MNT/usr/libexec/greatlte-charging"
