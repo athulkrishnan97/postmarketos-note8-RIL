@@ -1057,3 +1057,20 @@ the work below was done offline.)
   after each call. callaudio no longer drops audio when an answered call
   briefly reports ringing-in again.
 
+## 2026-10-13 ~16:00 BOOT CONSOLE ON THE PANEL: FREEZES AGAIN (REVERTED)
+- boot-v202-bootlog.img (laptop work/) = v201 + CONFIG_DRM_FBDEV_EMULATION=y
+  (+ DRM_CLIENT_*; FRAMEBUFFER_CONSOLE_DEFERRED_TAKEOVER=y) and loglevel=7 in
+  the dtb bootargs (work/v202/dtb). First boot: black screen, stuck (no panic
+  reboot despite softlockup/hung_task panic). Same symptom as the early
+  bring-up fbcon freeze (see "ROOT-CAUSE BUGS" #2).
+- Restored by flashing boot-v201-mdmwake.img from download mode. No log: the
+  only pstore record was undecodable and there was no console-ramoops (the
+  trip through download mode likely clears it).
+- Reverted: repo r18 commit (cd3ee29), laptop .config (bad one saved as
+  linux-7.0-ril/.config.fbdev-v202), ul-r13/blob/{Image,dtb} back to v201
+  (copies in work/v202/).
+- Next attempt, if wanted: same kernel but fbcon not bound at boot (e.g.
+  fbcon=map:9), then bind it over SSH (/sys/class/vtconsole/vtcon1/bind) to
+  see whether fbdev registration or the fbcon takeover hangs, and reboot
+  warm (not via download mode) so console-ramoops survives.
+
