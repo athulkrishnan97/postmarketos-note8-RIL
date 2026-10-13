@@ -1291,6 +1291,15 @@ static int px_local(const uint8_t *p, size_t n)
 		 */
 		px_reply("\r\n+CGDCONT: (1-11),\"IP\",,,(0-3),(0-4)\r\n"
 			 "\r\n+CGDCONT: (1-11),\"PPP\",,,(0-3),(0-4)\r\n\r\nOK\r\n");
+	} else if (!strcmp(cmd, "AT+WS46=?")) {
+		/*
+		 * The CP answers "+WS46: 12" (GSM only), so ModemManager sees no
+		 * LTE capability, never enables +CEREG and, on LTE, is left with
+		 * +CREG 0 / +CGREG 2: "searching", no access technology. The CP
+		 * does GSM, UMTS and LTE (AT+COPS reports AcT 7) and answers
+		 * +CEREG.
+		 */
+		px_reply("\r\n+WS46: (12,22,25,28,29,30,31)\r\n\r\nOK\r\n");
 	} else if (sms_at(cmd) || rat_at(cmd) || call_at(cmd)) {
 		;
 	} else if (dc.on_demand && sscanf(cmd, "AT+CGACT=%u,%u", &a, &b) == 2 && a <= 1) {
