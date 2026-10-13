@@ -4,7 +4,7 @@ maintainer="Jonas Heinrich <onny@project-insanity.org>"
 _flavor="postmarketos-exynos8895"
 pkgname=linux-$_flavor
 pkgver=7.0
-pkgrel=17
+pkgrel=18
 pkgdesc="Close-to-mainline kernel for Samsung Exynos 8895 devices"
 arch="aarch64"
 _carch="arm64"
@@ -75,6 +75,7 @@ source="
 	exynos8895-mfc.patch
 	exynos8895-suspend.patch
 	exynos8895-call-audio.patch
+	exynos8895-decon-flip-irq.patch
 "
 
 
@@ -141,4 +142,5 @@ e275302b5b98b4f84234f194025565d3ad1d66592fe91b877290adbd5b5ba072f3bd4b59956e5d33
 75373eafdcf3793694721b7c18587af86f2d1c84243f4a3174fb70e4e1887d68c2d863efb5fb6666e3976498af906c1060460d18b41b2d79bf6cb1141eb93064  exynos8895-mfc.patch
 dd4a7ffe83c98bbafc5ba537078017b03711390dd4b95d8cc14602ba99d9921435cf16c2dc6e36e9f536b35c5d28dd51eae0c9dbb1340b54fabbc77ba93bddd0  exynos8895-suspend.patch
 12855d53bc9e58f43209dd8bb0256f4929855fec4b6ee2cd21f7eb6b9b0a37a5c0eb1ad3d580a95b7d7b7d45980b4a39390112040413be552f0a1c86f9142511  exynos8895-call-audio.patch
+a51eabf5ef1f4ba4068be00b85c8277acdbf99263ee8948dbd7977b69e11d85fb949c23b75659635dea7965d952ed6ea03043e87d8eeed2f747033d5e5f50656  exynos8895-decon-flip-irq.patch
 "

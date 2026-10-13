@@ -1,0 +1,210 @@
+From: Athul <athulkrishnan97@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 16:30:00 +0100
+Subject: [PATCH] drm/bridge: exynos8895-decon: fix flip completion and IRQ races
+
+- atomic_flush stored the page-flip event before requesting the shadow
+  update. A frame-start interrupt in between saw no request pending and
+  completed the flip before the new buffer was latched, so the compositor
+  could reuse a buffer that was still being scanned out. Publish the
+  event and the request together under event_lock.
+- Frame start and frame done are separate GIC lines served by the same
+  handler, which can run concurrently on two CPUs. Each read the whole
+  pending register and wrote it back (write-1-to-clear), so one could
+  clear and swallow the other's event and vblanks could be counted
+  twice. Each line now handles and clears only its own bits.
+- Drop the bring-up heartbeat timer (a printk every 500 ms for the first
+  100 s) and demote the per-step CRTC enable messages to debug; log one
+  line per CRTC enable and disable instead.
+---
+--- a/drivers/gpu/drm/bridge/exynos8895-decon.c	2026-10-13 15:08:02.705684905 +0000
++++ b/drivers/gpu/drm/bridge/exynos8895-decon.c	2026-10-13 15:08:02.707784317 +0000
+@@ -29,7 +29,6 @@
+ #include <linux/interrupt.h>
+ #include <linux/io.h>
+ #include <linux/iopoll.h>
+-#include <linux/timer.h>
+ #include <linux/mfd/syscon.h>
+ #include <linux/module.h>
+ #include <linux/mutex.h>
+@@ -251,9 +250,6 @@
+ 	bool enabled;
+ 	/* page-flip event waiting for its frame (protected by drm.event_lock) */
+ 	struct drm_pending_vblank_event *event;
+-
+-	struct timer_list heartbeat;
+-	int heartbeat_count;
+ };
+ 
+ static inline struct exynos8895_decon *to_decon(struct drm_device *drm)
+@@ -704,18 +700,6 @@
+ 			IDMA_SFR_UPDATE_FORCE);
+ }
+ 
+-static void decon_heartbeat_timer(struct timer_list *t)
+-{
+-	struct exynos8895_decon *decon =
+-		container_of(t, struct exynos8895_decon, heartbeat);
+-
+-	printk(KERN_INFO "decon heartbeat %d enabled=%d\n",
+-	       decon->heartbeat_count++, decon->enabled);
+-	if (decon->heartbeat_count < 200)
+-		mod_timer(&decon->heartbeat,
+-			  jiffies + msecs_to_jiffies(500));
+-}
+-
+ /* ------------------------------------------------------------------ */
+ /* interrupt                                                           */
+ /* ------------------------------------------------------------------ */
+@@ -723,12 +707,25 @@
+ static irqreturn_t decon_irq_handler(int irq, void *dev_id)
+ {
+ 	struct exynos8895_decon *decon = dev_id;
+-	u32 pend;
++	u32 mine, pend;
+ 
+ 	if (!decon->enabled)
+ 		return IRQ_NONE;
+ 
+-	pend = decon_read(decon, DECON_INTERRUPT_PENDING);
++	/*
++	 * Frame start and frame done arrive on separate GIC lines and the
++	 * two handlers can run concurrently on different CPUs.  Each one
++	 * handles and clears only its own bits (the register is
++	 * write-1-to-clear, so plain writes leave the other bits alone);
++	 * a read-modify-write of the whole register let one handler eat
++	 * the other's event.
++	 */
++	mine = irq == decon->irq_start ? DECON_INT_FRAME_START_PEND :
++	       DECON_INT_FRAME_DONE_PEND | DECON_INT_EXTRA_PEND;
++	pend = decon_read(decon, DECON_INTERRUPT_PENDING) & mine;
++	if (!pend)
++		return IRQ_NONE;
++	decon_write(decon, DECON_INTERRUPT_PENDING, pend);
+ 
+ 	if (pend & DECON_INT_FRAME_START_PEND)
+ 		drm_crtc_handle_vblank(&decon->crtc);
+@@ -741,6 +738,8 @@
+ 	 * the old buffer is no longer read, so complete the event right
+ 	 * away (normally at frame start) instead of after the ~10 ms DSI
+ 	 * transfer; waiting for frame done made KWin miss every other TE.
++	 * atomic_flush sets the event and the update request together under
++	 * event_lock, so a pending request here always belongs to it.
+ 	 */
+ 	if (pend & (DECON_INT_FRAME_START_PEND | DECON_INT_FRAME_DONE_PEND)) {
+ 		spin_lock(&decon->drm.event_lock);
+@@ -756,14 +755,6 @@
+ 	if (pend & DECON_INT_EXTRA_PEND)
+ 		dev_err_ratelimited(decon->dev, "DPU extra interrupt pending\n");
+ 
+-	decon_write_mask(decon, DECON_INTERRUPT_PENDING,
+-			 pend & (DECON_INT_FRAME_DONE_PEND |
+-				 DECON_INT_FRAME_START_PEND |
+-				 DECON_INT_EXTRA_PEND),
+-			 DECON_INT_FRAME_DONE_PEND |
+-			 DECON_INT_FRAME_START_PEND |
+-			 DECON_INT_EXTRA_PEND);
+-
+ 	return IRQ_HANDLED;
+ }
+ 
+@@ -872,15 +863,15 @@
+ 	struct drm_display_mode *mode = &crtc->state->adjusted_mode;
+ 	int ret;
+ 
+-	dev_info(decon->dev, "CRTC enable: step clk\n");
++	dev_dbg(decon->dev, "CRTC enable: step clk\n");
+ 	clk_prepare_enable(decon->dpu_bus);
+-	dev_info(decon->dev, "CRTC enable: step gates\n");
++	dev_dbg(decon->dev, "CRTC enable: step gates\n");
+ 	decon_setup_clocks(decon);
+ 
+-	dev_info(decon->dev, "CRTC enable: step idma\n");
++	dev_dbg(decon->dev, "CRTC enable: step idma\n");
+ 	idma_init(decon);
+ 
+-	dev_info(decon->dev, "CRTC enable: step hw_init\n");
++	dev_dbg(decon->dev, "CRTC enable: step hw_init\n");
+ 	ret = decon_hw_init(decon, mode);
+ 	if (ret)
+ 		goto out_clk;
+@@ -911,18 +902,20 @@
+ 	{
+ 		int dsc_ret;
+ 
+-		dev_info(decon->dev, "CRTC enable: step dsc handoff\n");
++		dev_dbg(decon->dev, "CRTC enable: step dsc handoff\n");
+ 		dsc_ret = exynos8895_dsim_enable_dsc(decon->panel->dev->parent);
+-		dev_info(decon->dev, "DSIM DSC handoff: %d\n", dsc_ret);
++		if (dsc_ret)
++			dev_warn(decon->dev, "DSIM DSC handoff: %d\n", dsc_ret);
+ 	}
+ 
+-	dev_info(decon->dev, "CRTC enable: step start\n");
++	dev_dbg(decon->dev, "CRTC enable: step start\n");
+ 	decon->enabled = true;
+ 	enable_irq(decon->irq_start);
+ 	enable_irq(decon->irq);
+ 
+ 	decon_hw_start(decon);
+ 	drm_crtc_vblank_on(crtc);
++	dev_info(decon->dev, "CRTC enabled\n");
+ 	return;
+ 
+ out_clk:
+@@ -956,6 +949,7 @@
+ 	spin_unlock_irq(&crtc->dev->event_lock);
+ 
+ 	clk_disable_unprepare(decon->dpu_bus);
++	dev_info(decon->dev, "CRTC disabled\n");
+ }
+ 
+ static void decon_crtc_atomic_flush(struct drm_crtc *crtc,
+@@ -977,18 +971,23 @@
+ 
+ 	/*
+ 	 * The HW trigger stays armed while the CRTC is on, so every TE
+-	 * sends a frame; request the shadow update and let the frame-done
+-	 * interrupt complete the event once the new state is on screen.
++	 * sends a frame; request the shadow update and let the frame-start
++	 * interrupt complete the event once the new state is latched.  The
++	 * event and the request are published together under event_lock:
++	 * with the event stored first, a frame start in between saw no
++	 * request pending and completed the flip before the new buffer was
++	 * latched, so KWin reused a buffer that was still being scanned out.
+ 	 */
+-	if (event) {
++	if (event)
+ 		WARN_ON(drm_crtc_vblank_get(crtc));
+-		spin_lock_irq(&crtc->dev->event_lock);
++
++	spin_lock_irq(&crtc->dev->event_lock);
++	if (event) {
+ 		decon->event = event;
+-		spin_unlock_irq(&crtc->dev->event_lock);
+ 		crtc->state->event = NULL;
+ 	}
+-
+ 	decon_shadow_update_req(decon);
++	spin_unlock_irq(&crtc->dev->event_lock);
+ }
+ 
+ static const struct drm_crtc_helper_funcs decon_crtc_helper_funcs = {
+@@ -1028,7 +1027,7 @@
+ static void decon_encoder_atomic_enable(struct drm_encoder *encoder,
+ 					struct drm_atomic_state *state)
+ {
+-	dev_info(encoder->dev->dev, "encoder atomic_enable reached\n");
++	dev_dbg(encoder->dev->dev, "encoder atomic_enable reached\n");
+ }
+ 
+ static const struct drm_encoder_helper_funcs decon_encoder_helper_funcs = {
+@@ -1423,9 +1422,6 @@
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to register DRM device\n");
+ 
+-	timer_setup(&decon->heartbeat, decon_heartbeat_timer, 0);
+-	mod_timer(&decon->heartbeat, jiffies + msecs_to_jiffies(1000));
+-
+ #if IS_ENABLED(CONFIG_DRM_FBDEV_EMULATION)
+ 	drm_client_setup(&decon->drm, NULL);
+ #endif
