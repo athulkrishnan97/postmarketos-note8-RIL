@@ -28,6 +28,23 @@ Setup:
 5. `rc-service waydroid-container start` (or add it to the default
    runlevel), then start "Waydroid" from the launcher or
    `waydroid show-full-ui`.
+6. Deadlock fix (Android restarts by itself, "Waydroid crashed"): the
+   vendor image's hwcomposer.waydroid.so holds its windowsMutex in
+   keyboard_handle_enter while calling IWaydroidTask::setFocusedTask, which
+   needs system_server's WindowManager lock; system_server meanwhile holds
+   that lock and calls IWaydroidWindow::setIdleInhibit, which needs
+   windowsMutex. After 60 s Android's watchdog kills system_server. Hit when
+   the Waydroid window gets focus while an app toggles keep-screen-on
+   (video). hwc-focus-deadlock.py patches the binary to unlock before the
+   call (refuses any other build, by sha256):
+   ```
+   cp /var/lib/waydroid/rootfs/vendor/lib64/hw/hwcomposer.waydroid.so .   # while running
+   ./hwc-focus-deadlock.py hwcomposer.waydroid.so hwcomposer.patched.so
+   sudo install -D -m 644 hwcomposer.patched.so \
+       /var/lib/waydroid/overlay/vendor/lib64/hw/hwcomposer.waydroid.so
+   ```
+   then restart Waydroid. Remove the overlay file before moving to a new
+   vendor image, or it replaces the new image's hwcomposer.
 
 Known: the Android clock widget's digits render as blocks (Panfrost/Mesa
 text rendering, like the GTK4 issue).

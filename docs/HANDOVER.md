@@ -1116,3 +1116,20 @@ the work below was done offline.)
   metric 600 wins over rmnet0 metric 700, mobile data takes over when Wi-Fi
   drops. Applied live (nmcli general reload conf + con up "Mobile data");
   ActivatingConnection is now "/" and the Wi-Fi icon shows.
+
+## 2026-10-13 ~18:30 WAYDROID "CRASH" = HWCOMPOSER DEADLOCK (PATCHED)
+- 18:20 BST: Android's watchdog killed system_server (framework restart,
+  container stayed up). Trace (/data/anr in the container): android.anim
+  held the WindowManager lock inside IWaydroidWindow.setIdleInhibit; the
+  hwcomposer's binder thread waited for windowsMutex, held by its Wayland
+  thread in keyboard_handle_enter, which was blocked in
+  IWaydroidTask.setFocusedTask -> system_server -> WindowManager lock. A
+  three-way deadlock in Waydroid's vendor code, not the kernel.
+- Patched hwcomposer.waydroid.so (tools/waydroid/hwc-focus-deadlock.py:
+  unlock before the HIDL call, code in the R+X segment's tail padding) in
+  /var/lib/waydroid/overlay/vendor/lib64/hw/. Original image untouched;
+  rollback = delete that file and restart Waydroid. Laptop copies in
+  work/waydroid/hwc/. Restarted Waydroid, app switching fine.
+- Unrelated: two earlier "No region space mem map" aborts of
+  app.morphe.manager:Patcher (ART failing to reserve its heap in that
+  process) — the patcher's own process, not Waydroid.
