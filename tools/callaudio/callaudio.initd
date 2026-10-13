@@ -1,0 +1,15 @@
+#!/sbin/openrc-run
+
+description="Voice call audio routing (earpiece and mics)"
+command=/usr/local/sbin/callaudio
+command_background=true
+pidfile=/run/callaudio.pid
+
+start_pre() {
+	export EARPIECE_VOLUME MIC_VOLUME SEND_SND
+}
+
+depend() {
+	need dbus
+	after modemmanager modem-ipc
+}

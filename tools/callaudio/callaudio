@@ -1,0 +1,316 @@
+#!/usr/bin/python3
+# callaudio - voice call audio for the Galaxy Note 8 (greatlte).
+#
+# The CP's speech frames are handled by the voice firmware (VSS) on the ABOX
+# DSP: it writes the downlink into the ABOX mixer (RDMA4) and reads the
+# uplink from NSRC1 (WDMA2), both through UAIF0, the I2S link to the codec.
+# The AP only has to keep that link running and route the codec:
+#
+#   downlink: UAIF0 -> AIF1RX1 -> HPOUT3L -> OUT3 demux HPOUT4 -> earpiece
+#   uplink:   main mic (IN3L) -> AIF1TX1, second mic (IN2L) -> AIF1TX2 -> UAIF0
+#
+# While a call is dialing, ringing out, active or held this daemon:
+#   - suspends PulseAudio's devices on the card, which hold hw:0,0
+#   - saves the mixer controls it changes and sets the routes above
+#   - runs a playback (silence) and a capture (discarded) stream on hw:0,0,
+#     which keep UAIF0 and the codec's AIF1 clocked
+#   - enables the ABOX call DMAs (RDMA4/WDMA2) through the driver's "call"
+#     attribute
+#   - once a call is active, sends the stock HAL's sound setup to the CP
+#     through mifmon (IPC SND: path handset, volume, mode, unmute)
+# and undoes all of it when the last call ends.
+#
+# Settings: /etc/conf.d/callaudio. Log: /var/log/callaudio.log.
+
+import os
+import pwd
+import subprocess
+import sys
+import time
+
+import dbus
+import dbus.mainloop.glib
+from gi.repository import GLib
+
+CARD = "0"
+PCM = "hw:0,0"
+ABOX_CALL = "/sys/bus/platform/drivers/samsung-abox/13e50000.audio-controller/call"
+MIFMON_CTL = "/run/mifmon.ctl"
+LOG = "/var/log/callaudio.log"
+
+# HPOUT3 Digital Volume: 0.5 dB steps, 128 = 0 dB, limited to 116 (-6 dB)
+EARPIECE_VOLUME = os.environ.get("EARPIECE_VOLUME") or "104"
+# IN2L/IN3L Digital Volume: 0.5 dB steps, 128 = 0 dB (stock: 140, +6 dB)
+MIC_VOLUME = os.environ.get("MIC_VOLUME") or "152"
+SEND_SND = (os.environ.get("SEND_SND") or "1") == "1"
+
+CONTROLS = [
+	("OUT3 Demux", "HPOUT4"),
+	("HPOUT3L Input 1", "AIF1RX1"),
+	("HPOUT3L Input 2", "None"),
+	("HPOUT3R Input 1", "None"),
+	("HPOUT3 Digital Volume", f"{EARPIECE_VOLUME},{EARPIECE_VOLUME}"),
+	("HPOUT3 Digital Switch", "on,on"),
+	("Earpiece Switch", "on"),
+	("IN2 Mode", "Digital"),
+	("IN2 OSR", "3.072MHz"),
+	("IN3 OSR", "3.072MHz"),
+	("IN2L HPF Switch", "on"),
+	("IN3L HPF Switch", "on"),
+	("IN3L Digital Volume", MIC_VOLUME),
+	("IN2L Digital Volume", MIC_VOLUME),
+	("AIF1TX1 Input 1", "IN3L"),
+	("AIF1TX2 Input 1", "IN2L"),
+	("Main Mic Switch", "on"),
+	("Sub Mic Switch", "on"),
+]
+
+# IPC SND (group 09) SET commands, as the stock audio HAL sends them at call
+# start: path handset, volume 5, audio mode 0, TX unmute, RX unmute
+SND_SETUP = ["fmt 09 03 03 01 00", "fmt 09 01 03 01 05", "fmt 09 0d 03 00 00",
+	     "fmt 09 02 03 00", "fmt 09 02 03 02"]
+
+MM = "org.freedesktop.ModemManager1"
+MM_PATH = "/org/freedesktop/ModemManager1"
+CALL_IFACE = MM + ".Call"
+VOICE_IFACE = MM + ".Modem.Voice"
+DIALING, RINGING_OUT, ACTIVE, HELD, TERMINATED = 1, 2, 4, 5, 7
+AUDIO_STATES = (DIALING, RINGING_OUT, ACTIVE, HELD)
+
+
+def log(msg):
+	with open(LOG, "a") as f:
+		f.write(time.strftime("%F %T ") + msg + "\n")
+
+
+def run(args, **kw):
+	return subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+			      text=True, **kw)
+
+
+def amixer_get(name):
+	out = run(["amixer", "-c", CARD, "cget", f"name={name}"]).stdout
+	for line in out.splitlines():
+		line = line.strip()
+		if line.startswith(": values="):
+			return line[len(": values="):]
+	return None
+
+
+def amixer_set(name, value):
+	r = run(["amixer", "-c", CARD, "-q", "cset", f"name={name}", value])
+	if r.returncode:
+		log(f"amixer {name}={value} failed: {r.stderr.strip()}")
+
+
+def pulse_sessions():
+	"""(uid, gid, env) of every running PulseAudio daemon."""
+	out = run(["pgrep", "-x", "pulseaudio"]).stdout.split()
+	for pid in out:
+		try:
+			st = os.stat(f"/proc/{pid}")
+			with open(f"/proc/{pid}/environ", "rb") as f:
+				penv = dict(e.split(b"=", 1) for e in f.read().split(b"\0") if b"=" in e)
+		except OSError:
+			continue
+		pw = pwd.getpwuid(st.st_uid)
+		env = {"PATH": "/usr/bin:/bin", "HOME": pw.pw_dir,
+		       "XDG_RUNTIME_DIR": penv.get(b"XDG_RUNTIME_DIR", b"").decode()
+		       or f"/run/user/{st.st_uid}"}
+		yield st.st_uid, pw.pw_gid, env
+
+
+def pactl(uid, gid, env, *args):
+	def drop():
+		os.setgid(gid)
+		os.setuid(uid)
+	return run(["pactl", *args], env=env, preexec_fn=drop, timeout=10)
+
+
+def pulse_suspend(on):
+	"""Suspend (or resume) PulseAudio's sinks and sources on the card."""
+	for uid, gid, env in pulse_sessions():
+		try:
+			for kind in ("sink", "source"):
+				out = pactl(uid, gid, env, "list", "short", kind + "s").stdout
+				for line in out.splitlines():
+					f = line.split("\t")
+					if len(f) > 1 and "platform-sound" in f[1]:
+						pactl(uid, gid, env, f"suspend-{kind}", f[1],
+						      "1" if on else "0")
+		except (OSError, subprocess.SubprocessError) as e:
+			log(f"pactl failed: {e}")
+
+
+def mifmon_send(lines):
+	try:
+		fd = os.open(MIFMON_CTL, os.O_WRONLY | os.O_NONBLOCK)
+	except OSError as e:
+		log(f"mifmon not reachable: {e}")
+		return
+	try:
+		for l in lines:
+			os.write(fd, (l + "\n").encode())
+			time.sleep(0.3)
+	finally:
+		os.close(fd)
+
+
+def write_sysfs(path, value):
+	try:
+		with open(path, "w") as f:
+			f.write(value)
+	except OSError as e:
+		log(f"{path} <- {value}: {e}")
+
+
+class CallAudio:
+	def __init__(self, bus):
+		self.bus = bus
+		self.calls = {}		# call path -> state
+		self.snd_sent = set()	# calls that got the SND setup
+		self.on = False
+		self.saved = []
+		self.streams = {}
+		bus.add_signal_receiver(self.state_changed, "StateChanged", CALL_IFACE,
+					MM, path_keyword="path")
+		bus.add_signal_receiver(self.call_deleted, "CallDeleted", VOICE_IFACE, MM)
+		bus.add_signal_receiver(self.mm_owner, "NameOwnerChanged",
+					"org.freedesktop.DBus", arg0=MM)
+		self.resync()
+
+	def resync(self):
+		calls = {}
+		try:
+			om = dbus.Interface(self.bus.get_object(MM, MM_PATH),
+					    "org.freedesktop.DBus.ObjectManager")
+			for modem in om.GetManagedObjects():
+				voice = dbus.Interface(self.bus.get_object(MM, modem), VOICE_IFACE)
+				for c in voice.ListCalls():
+					props = dbus.Interface(self.bus.get_object(MM, c),
+							       "org.freedesktop.DBus.Properties")
+					calls[str(c)] = int(props.Get(CALL_IFACE, "State"))
+		except dbus.DBusException as e:
+			log(f"resync: {e.get_dbus_name()}")
+		self.calls = calls
+		self.update()
+		return True
+
+	def mm_owner(self, name, old, new):
+		log(f"ModemManager {'started' if new else 'stopped'}")
+		self.calls = {}
+		self.update()
+		if new:
+			GLib.timeout_add_seconds(3, lambda: self.resync() and False)
+
+	def state_changed(self, old, new, reason, path=None):
+		path = str(path)
+		log(f"{path}: state {int(old)} -> {int(new)}")
+		if int(new) == TERMINATED:
+			self.calls.pop(path, None)
+			self.snd_sent.discard(path)
+		else:
+			self.calls[path] = int(new)
+		self.update()
+
+	def call_deleted(self, path):
+		self.calls.pop(str(path), None)
+		self.snd_sent.discard(str(path))
+		self.update()
+
+	def update(self):
+		want = any(s in AUDIO_STATES for s in self.calls.values())
+		if want and not self.on:
+			self.start()
+		elif not want and self.on:
+			self.stop()
+		if self.on and SEND_SND:
+			for path, state in self.calls.items():
+				if state == ACTIVE and path not in self.snd_sent:
+					self.snd_sent.add(path)
+					log("sending SND setup")
+					mifmon_send(SND_SETUP)
+
+	def start(self):
+		log("call audio on")
+		self.on = True
+		pulse_suspend(True)
+		self.saved = [(n, amixer_get(n)) for n, _ in CONTROLS]
+		for n, v in CONTROLS:
+			amixer_set(n, v)
+		self.start_stream("playback", 5)
+		self.start_stream("capture", 5)
+		write_sysfs(ABOX_CALL, "1")
+		GLib.timeout_add_seconds(10, self.watchdog)
+
+	def start_stream(self, kind, tries):
+		if not self.on:
+			return False
+		fmt = ["-q", "-D", PCM, "-c", "2", "-r", "48000", "-f", "S16_LE"]
+		if kind == "playback":
+			args = ["aplay", *fmt, "-t", "raw", "/dev/zero"]
+		else:
+			args = ["arecord", *fmt, "-t", "raw", "/dev/null"]
+		p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+		self.streams[kind] = p
+		# PulseAudio may take a moment to release the device
+		def check():
+			if self.streams.get(kind) is p and p.poll() is not None:
+				err = p.stderr.read().decode().strip()
+				log(f"{kind} stream exited: {err}")
+				if tries > 1:
+					self.start_stream(kind, tries - 1)
+			return False
+		GLib.timeout_add(700, check)
+		return False
+
+	def watchdog(self):
+		if not self.on:
+			return False
+		for kind, p in list(self.streams.items()):
+			if p.poll() is not None:
+				log(f"{kind} stream died, restarting")
+				self.start_stream(kind, 3)
+		# a call can vanish without a signal (ModemManager restart)
+		self.resync()
+		return self.on
+
+	def stop(self):
+		log("call audio off")
+		self.on = False
+		write_sysfs(ABOX_CALL, "0")
+		for p in self.streams.values():
+			p.terminate()
+		for p in self.streams.values():
+			try:
+				p.wait(2)
+			except subprocess.TimeoutExpired:
+				p.kill()
+		self.streams = {}
+		for n, v in self.saved:
+			if v is not None:
+				amixer_set(n, v)
+		self.saved = []
+		pulse_suspend(False)
+
+
+def main():
+	dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+	bus = dbus.SystemBus()
+	log(f"started (earpiece volume {EARPIECE_VOLUME}, mic volume {MIC_VOLUME})")
+	ca = CallAudio(bus)
+	loop = GLib.MainLoop()
+
+	def quit(*_):
+		if ca.on:
+			ca.stop()
+		loop.quit()
+	import signal
+	GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, quit)
+	GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, quit)
+	loop.run()
+	log("stopped")
+
+
+if __name__ == "__main__":
+	sys.exit(main())

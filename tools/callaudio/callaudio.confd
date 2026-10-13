@@ -1,0 +1,12 @@
+# Settings for callaudio (voice call audio routing)
+
+# Earpiece level, HPOUT3 Digital Volume: 0.5 dB steps, 128 = 0 dB,
+# limited to 116 (-6 dB) by the machine driver
+#EARPIECE_VOLUME=104
+
+# Mic level, IN2L/IN3L Digital Volume: 0.5 dB steps, 128 = 0 dB
+# (stock Android uses 140, +6 dB)
+#MIC_VOLUME=152
+
+# Send the stock HAL's sound setup to the CP when a call goes active (1/0)
+#SEND_SND=1
