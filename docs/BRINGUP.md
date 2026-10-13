@@ -1336,15 +1336,19 @@ ModemManager client. Pieces:
     dummy regulator, the mic charge pump stays off (reg 0x200 bit 0) and the
     DMICs read a constant -32768. It has to load before the codec
     (softdep in /etc/modprobe.d/greatlte-audio.conf).
-- Userspace, tools/callaudio (OpenRC service): while a call is dialing,
-  ringing out, active or held it
+- Userspace, tools/callaudio (OpenRC service). As soon as a call exists,
+  ringing in included, it arms the ABOX side (VDD_INT/gear 1 below, call
+  attribute): VSS sets up its channel about 1 s after the call connects,
+  and with the call DMAs started only at answer the uplink stayed silent on
+  incoming calls. While a call is dialing, ringing out, active or held it
+  also
   - suspends PulseAudio's devices on the card (they hold hw:0,0);
   - routes AIF1RX1 -> HPOUT3L -> OUT3 demux HPOUT4 (earpiece, mono
     differential) and IN3L/IN2L (digital, OSR 3.072 MHz) -> AIF1TX1/2;
   - runs a silent playback and a discarded capture on hw:0,0, which keep
     UAIF0 and the codec's AIF1 clocked;
-  - writes the call attribute and, once the call is active, sends the stock
-    HAL's IPC SND setup through mifmon;
+  - once the call is active, sends the stock HAL's IPC SND setup through
+    mifmon;
   - raises VDD_INT (S2MPS17 BUCK4, B4OUT 0x20 on the SPEEDY bus: 0x37 =
     644 mV -> 0x50 = 800 mV) and sets gear_min=1. At 590 MHz the far end
     hears the uplink choppy (short dropouts; the uplink's software ASRC and

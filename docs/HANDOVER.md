@@ -1047,4 +1047,9 @@ the work below was done offline.)
   sound files byte-identical to the laptop tree; config survives olddefconfig.
 - Open: a reboot to confirm module load order (micsupp before the codec) and
   callaudio at boot; speakerphone; headset; LTE calls.
+- ~14:30: rebooted onto the r17 sound module: micsupp loads before the codec
+  (MICVDD real), VSS mapped, callaudio up at boot, mics record. An incoming
+  call answered in the dialer then had no uplink: callaudio started the
+  call DMAs only at answer. Now armed while ringing (c5b5a07); user-tested
+  incoming and outgoing after the fix: both ways fine.
 

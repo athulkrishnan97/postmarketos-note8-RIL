@@ -1,10 +1,11 @@
 # callaudio
 
-Voice call audio for the Galaxy Note 8: while a call is dialing, ringing out,
-active or held, routes the downlink to the earpiece and both digital mics to
-the uplink, keeps the ABOX/codec I2S link (UAIF0 <-> AIF1) clocked and enables
-the ABOX call DMAs, then restores everything when the last call ends. Works
-with any ModemManager voice client (plasma-dialer, gnome-calls).
+Voice call audio for the Galaxy Note 8: as soon as a call exists (ringing
+in included) enables the ABOX call DMAs and raises VDD_INT for the A7; while
+a call is dialing, ringing out, active or held, routes the downlink to the
+earpiece and both digital mics to the uplink and keeps the ABOX/codec I2S
+link (UAIF0 <-> AIF1) clocked; restores everything when the last call ends.
+Works with any ModemManager voice client (plasma-dialer, gnome-calls).
 
 Needs:
 
