@@ -1179,3 +1179,23 @@ the work below was done offline.)
   tree with the r21 abox module, current mifmon, modes 2g|3g|4g,
   /etc/modprobe.d/abox-debug.conf (fw_log=1) kept for the next tests. The
   v204 tree is /lib/modules/7.0.0.v204-backup again.
+
+## 2026-10-14 ~20:40 CALL AUDIO: VSS PROCESSING OUTPUTS SILENCE BOTH WAYS
+- SIM tested in another phone: calls fine, so not the network/SIM.
+- Interface clock: hw:0,0 runs at 48 kHz (timed capture), not the cause.
+- Tone test (codec Tone Generator 1 on AIF1TX1/2): the tone reaches WDMA2,
+  VSS working memory (+0x304a00, +0x315600) and the VSS shared area
+  (+0x504000, +0x511c00..+0x512200), yet the AMR encoder logs SP 0 VAD 0
+  DTX 1 for every frame and the far end hears nothing.
+- Downlink: VSS decodes the frames (Abox_vhmVocRxDecCnt ~940/call), but
+  its output ring (+0x508000, 0x780 bytes, same size as the RDMA4 SRAM
+  buffer) and RDMA4 stay all zero; Calliope's copy is not the problem.
+- The only error VSS logs: "[ISR_WDMAInt][ERROR]MIXED_ECHO_FULL not ready"
+  (no echo reference / MixRef). ROUTE_CTRL1 NSRC0 <- SIFS0 for the whole
+  call changes nothing. Stock mixer_paths: incall_nb-handset = route-playback
+  (empty) + dev-handset, route-cp-tx = NSRC1 UAIF0, NSRC0 RESERVED: no
+  extra ABOX setup for calls in stock either.
+- Next: VSS speech-enhancement chain (Rx/Tx SE, VHM_Control.c) in the VSS
+  image (Thumb-2, runs at 0xa0000000; trace entries in RADIO MAIN). Tools in
+  tools/modem/vsslog; tonehunt/echoref/bufprobe scripts in the session
+  scratchpad (to be added if useful).
