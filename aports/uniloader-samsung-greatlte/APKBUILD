@@ -2,12 +2,12 @@
 maintainer="athul <athul@postmarketos.org>"
 pkgname=uniloader-samsung-greatlte
 pkgver=0.0.1
-pkgrel=2
+pkgrel=3
 pkgdesc="Samsung Greatlte AArch64 boot shim"
 url="https://github.com/ivoszbg/uniLoader/"
 arch="aarch64"
 license="GPL-2.0-only"
-makedepends="gcc linux-postmarketos-exynos8895"
+makedepends="gcc lz4 linux-postmarketos-exynos8895"
 options="!check"
 _commit="e8466561575ed4e2e23217b54b751ea30273549e"
 _dtb="exynos8895-greatlte.dtb"
@@ -21,7 +21,10 @@ build() {
 	unset LDFLAGS
 	# Stage kernel Image and devicetree blob from the exynos8895 kernel
 	# package before invoking uniLoader's own make-based build
-	cp "/boot/vmlinuz" blob/Image
+	# The kernel goes in LZ4-compressed (legacy format, unpacked by
+	# uniLoader, CONFIG_KERNEL_LZ4): the boot image drops from ~41.6 MB
+	# to ~17 MB, well inside the 40 MiB BOOT partition
+	lz4 -l -9 -f -q "/boot/vmlinuz" blob/Image
 	cp "/boot/dtbs/exynos/$_dtb" blob/dtb
 	touch blob/ramdisk
 
@@ -38,5 +41,5 @@ package() {
 
 sha512sums="
 7aa9e30ba70a8551365b5a7bd7c5f675db22b2b9904ae06202c176e9f1b19f6846348ee13519ce1896a664c827d276f5fbc0923c81bfc90bade4220979f9de01  uniLoader-e8466561575ed4e2e23217b54b751ea30273549e.tar.gz
-0b249dfc7f451ad24d185ae45184575af352b57888a61e400ac27bc8e1d4c5f91a279dfa303b082bb1a57f8873c27194a6dacc8228b750332b320f09931fde7b  greatlte.patch
+1d12b92405c83ee95955f494e4d6bb0e8461383834c4770bc64d96cb81eb5d75ac6ce9f2fe9701d59f2a294d4f6d20aa3ef990ed15cf4e2f64d06d00f5df4c64  greatlte.patch
 "

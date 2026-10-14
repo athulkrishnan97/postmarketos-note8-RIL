@@ -1,3 +1,267 @@
+diff --git a/Kconfig b/Kconfig
+index be6c890..2582079 100644
+--- a/Kconfig
++++ b/Kconfig
+@@ -45,6 +45,21 @@ menu "Building options"
+ 		help
+ 		  Path to the kernel, which is going to get embedded to uniLoader
+ 
++	config KERNEL_LZ4
++		bool "Kernel image is LZ4 compressed"
++		depends on EMBED_LINUX
++		default n
++		help
++		  The kernel image is in the LZ4 legacy format (lz4 -l, as Linux
++		  uses for compressed kernels); uniLoader unpacks it to the payload
++		  address instead of copying it. Saves about half of the size of
++		  the boot image. aarch64 only.
++
++	config KERNEL_LZ4_MAX_SIZE
++		hex "Largest unpacked kernel image"
++		depends on KERNEL_LZ4
++		default 0x3e00000
++
+ 	config DT_PATH
+ 		string "Path to device tree image"
+ 		depends on EMBED_LINUX
+diff --git a/arch/aarch64/Makefile b/arch/aarch64/Makefile
+index 5973c6d..9cefffb 100644
+--- a/arch/aarch64/Makefile
++++ b/arch/aarch64/Makefile
+@@ -4,3 +4,4 @@
+ 
+ obj-$(CONFIG_POSITION_INDEPENDENT) += aarch64/reloc.o
+ obj-y += aarch64/start.o aarch64/load-kernel.o aarch64/memcpy.o
++obj-$(CONFIG_KERNEL_LZ4) += aarch64/lz4-cache.o
+diff --git a/arch/aarch64/load-kernel.c b/arch/aarch64/load-kernel.c
+index 8eee041..1a15bad 100644
+--- a/arch/aarch64/load-kernel.c
++++ b/arch/aarch64/load-kernel.c
+@@ -7,9 +7,137 @@
+ #include <main/boot.h>
+ #include <string.h>
+ 
++#ifdef CONFIG_KERNEL_LZ4
++#include <stdint.h>
++#include <lib/debug.h>
++#include <lib/lz4.h>
++#include <main/main.h>
++#ifdef CONFIG_LIBFDT
++#include <lib/libfdt/libfdt.h>
++#endif
++
++extern char _stack_end[];
++
++void lz4_dcache_inval(uint64_t start, uint64_t end);
++void lz4_mmu_on(uint64_t *table);
++void lz4_mmu_off(uint64_t start1, uint64_t end1, uint64_t start2,
++		 uint64_t end2, uint64_t sctlr);
++
++#define SZ_2M			0x200000ull
++#define SZ_1G			0x40000000ull
++#define CACHED_GB		2	/* 0x80000000: payload and uniLoader */
++
++#define DESC_VALID		(1ull << 0)
++#define DESC_TABLE		(3ull << 0)
++#define DESC_AF			(1ull << 10)
++#define DESC_ISH		(3ull << 8)
++#define DESC_XN			(3ull << 53)
++#define DESC_ATTR(n)		((uint64_t)(n) << 2)
++#define BLOCK_DEVICE		(DESC_VALID | DESC_AF | DESC_XN | DESC_ATTR(0))
++#define BLOCK_NORMAL		(DESC_VALID | DESC_AF | DESC_ISH | DESC_ATTR(1))
++
++static uint64_t lz4_l1[512] __attribute__((aligned(4096)));
++static uint64_t lz4_l2[512] __attribute__((aligned(4096)));
++
++static int in_cached_gb(uint64_t start, uint64_t end)
++{
++	return start >= CACHED_GB * SZ_1G && end <= (CACHED_GB + 1) * SZ_1G;
++}
++
++/*
++ * Identity map of the 32-bit space as Device memory, except the two ranges
++ * the unpacking touches: those are cacheable, in 2 MiB blocks. Nothing else
++ * is Normal memory, so nothing else (secure carve-outs) is ever accessed
++ * speculatively.
++ */
++static void lz4_build_tables(uint64_t s1, uint64_t e1, uint64_t s2, uint64_t e2)
++{
++	uint64_t base = CACHED_GB * SZ_1G, a;
++	int i;
++
++	for (i = 0; i < 4; i++)
++		lz4_l1[i] = i * SZ_1G | BLOCK_DEVICE;
++	for (i = 0; i < 512; i++)
++		lz4_l2[i] = (base + i * SZ_2M) | BLOCK_DEVICE;
++	for (a = s1 & ~(SZ_2M - 1); a < e1; a += SZ_2M)
++		lz4_l2[(a - base) / SZ_2M] = a | BLOCK_NORMAL;
++	for (a = s2 & ~(SZ_2M - 1); a < e2; a += SZ_2M)
++		lz4_l2[(a - base) / SZ_2M] = a | BLOCK_NORMAL;
++	lz4_l1[CACHED_GB] = (uint64_t)lz4_l2 | DESC_TABLE;
++}
++
++static uint64_t read_cntvct(void)
++{
++	uint64_t v;
++
++	asm volatile("isb; mrs %0, cntvct_el0" : "=r"(v));
++	return v;
++}
++
++/*
++ * Leave the unpacking time (arch timer ticks) and the CPU state it started
++ * in under /chosen, for measuring from Linux.
++ */
++static void note_lz4(void *dt, uint64_t ticks, uint64_t sctlr, int cached)
++{
++#ifdef CONFIG_LIBFDT
++	int chosen = fdt_path_offset(dt, "/chosen");
++
++	if (chosen < 0)
++		return;
++	fdt_setprop_u64(dt, chosen, "uniloader,lz4-ticks", ticks);
++	fdt_setprop_u64(dt, chosen, "uniloader,sctlr", sctlr);
++	fdt_setprop_u32(dt, chosen, "uniloader,lz4-cached", cached);
++#endif
++}
++
++static long unpack_kernel(void *kernel, void *dt)
++{
++	uint64_t out = CONFIG_PAYLOAD_ENTRY;
++	uint64_t out_end = out + CONFIG_KERNEL_LZ4_MAX_SIZE;
++	uint64_t self = CONFIG_TEXT_BASE, self_end = (uint64_t)_stack_end;
++	uint64_t start = read_cntvct(), el, sctlr;
++	int cached;
++	long size;
++
++	asm volatile("mrs %0, CurrentEL" : "=r"(el));
++	asm volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
++
++	/* only from EL1 with the MMU off, and with both ranges in one GiB */
++	cached = (el >> 2) == 1 && !(sctlr & 1) &&
++		 in_cached_gb(out, out_end) && in_cached_gb(self, self_end);
++	if (cached) {
++		lz4_build_tables(out, out_end, self, self_end);
++		/* stale lines from before the bootloader cleaned up must go */
++		lz4_dcache_inval(out, out_end);
++		lz4_dcache_inval(self, self_end);
++		lz4_mmu_on(lz4_l1);
++	}
++
++	size = lz4_legacy_decompress(kernel, (unsigned long) &kernel_size,
++				     (void*)out, CONFIG_KERNEL_LZ4_MAX_SIZE);
++
++	if (cached)
++		lz4_mmu_off(self, self_end, out, out_end, sctlr);
++
++	note_lz4(dt, read_cntvct() - start, sctlr, cached);
++	return size;
++}
++#endif
++
+ void arch_load_kernel(void* kernel, void* dt, void* ramdisk)
+ {
++#ifdef CONFIG_KERNEL_LZ4
++	long size = unpack_kernel(kernel, dt);
++
++	if (size < 0) {
++		printk(KERN_EMERG, "kernel image is not valid LZ4, hanging\n");
++		HANG();
++	}
++	printk(KERN_INFO, "unpacked %ld bytes of kernel\n", size);
++#else
+ 	memcpy((void*)CONFIG_PAYLOAD_ENTRY, kernel, (unsigned long) &kernel_size);
++#endif
+ #ifndef CONFIG_RAMDISK_NO_COPY
+ 	__optimized_memcpy((void*)CONFIG_RAMDISK_ENTRY, ramdisk, (unsigned long) &ramdisk_size);
+ #endif
+diff --git a/arch/aarch64/lz4-cache.S b/arch/aarch64/lz4-cache.S
+new file mode 100644
+index 0000000..11efff1
+--- /dev/null
++++ b/arch/aarch64/lz4-cache.S
+@@ -0,0 +1,81 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * Caches for unpacking an LZ4 kernel. The bootloader enters at EL1 with the
++ * MMU off, where every data access is an uncached Device access and
++ * unpacking 40 MB takes about 9 s. These turn on an identity map with the
++ * caches for the unpacking only, and leave memory clean afterwards.
++ */
++#include "asmdefs.h"
++
++/* MAIR: attr0 Device-nGnRnE, attr1 Normal write-back */
++#define LZ4_MAIR	0xff00
++/* TCR: 32-bit VA (T0SZ 32), 4K granule, WB WA inner shareable walks,
++ * no TTBR1 walks (EPD1), 32-bit PA */
++#define LZ4_TCR		(32 | 1 << 8 | 1 << 10 | 3 << 12 | 1 << 23)
++
++/* \reg = smallest D-cache line size in bytes */
++.macro dcache_line, reg, tmp
++	mrs	\tmp, ctr_el0
++	ubfx	\tmp, \tmp, #16, #4
++	mov	\reg, #4
++	lsl	\reg, \reg, \tmp
++.endm
++
++/* x0 = start, x1 = end: invalidate the D-cache lines of [x0, x1) */
++ENTRY(lz4_dcache_inval)
++	dcache_line x2, x3
++	sub	x3, x2, #1
++	bic	x0, x0, x3
++1:	dc	ivac, x0
++	add	x0, x0, x2
++	cmp	x0, x1
++	b.lo	1b
++	dsb	sy
++	ret
++END(lz4_dcache_inval)
++
++/* x0 = level 1 translation table: MMU, D- and I-cache on */
++ENTRY(lz4_mmu_on)
++	ldr	x1, =LZ4_MAIR
++	msr	mair_el1, x1
++	ldr	x1, =LZ4_TCR
++	msr	tcr_el1, x1
++	msr	ttbr0_el1, x0
++	isb
++	tlbi	vmalle1
++	dsb	nsh
++	isb
++	mrs	x1, sctlr_el1
++	mov	x2, #(1 << 0 | 1 << 2 | 1 << 12)	/* M, C, I */
++	orr	x1, x1, x2
++	msr	sctlr_el1, x1
++	isb
++	ret
++END(lz4_mmu_on)
++
++/*
++ * x0..x1 and x2..x3: ranges to clean and invalidate to the point of
++ * coherency, x4: SCTLR_EL1 to restore (MMU off). No memory writes happen
++ * between the cleaning and the MMU going off.
++ */
++ENTRY(lz4_mmu_off)
++	dcache_line x6, x7
++	sub	x7, x6, #1
++	bic	x0, x0, x7
++1:	dc	civac, x0
++	add	x0, x0, x6
++	cmp	x0, x1
++	b.lo	1b
++	bic	x2, x2, x7
++2:	dc	civac, x2
++	add	x2, x2, x6
++	cmp	x2, x3
++	b.lo	2b
++	dsb	sy
++	msr	sctlr_el1, x4
++	isb
++	ic	iallu
++	dsb	sy
++	isb
++	ret
++END(lz4_mmu_off)
 diff --git a/board/Kconfig b/board/Kconfig
 index d0dd864..970a025 100644
 --- a/board/Kconfig
@@ -181,10 +445,10 @@ index 0000000..67fcd61
 +};
 diff --git a/configs/greatlte_defconfig b/configs/greatlte_defconfig
 new file mode 100644
-index 0000000..70756e9
+index 0000000..e49b408
 --- /dev/null
 +++ b/configs/greatlte_defconfig
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,9 @@
 +CONFIG_POSITION_INDEPENDENT=y
 +# CONFIG_COMPRESS_GZIP is not set
 +CONFIG_EXYNOS_8895=y
@@ -193,3 +457,166 @@ index 0000000..70756e9
 +CONFIG_TEXT_BASE=0x87000000
 +CONFIG_PAYLOAD_ENTRY=0x80200000
 +CONFIG_RAMDISK_ENTRY=0x84000000
++CONFIG_KERNEL_LZ4=y
+diff --git a/include/lib/lz4.h b/include/lib/lz4.h
+new file mode 100644
+index 0000000..e9c831d
+--- /dev/null
++++ b/include/lib/lz4.h
+@@ -0,0 +1,13 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef LIB_LZ4_H_
++#define LIB_LZ4_H_
++
++/*
++ * Decompress an LZ4 legacy-format stream (lz4 -l) into dst.
++ * Returns the decompressed size, or -1 if the input is corrupt or does
++ * not fit in dstmax bytes.
++ */
++long lz4_legacy_decompress(const void *src, unsigned long srclen,
++			   void *dst, unsigned long dstmax);
++
++#endif
+diff --git a/lib/Makefile b/lib/Makefile
+index 93b8bc9..1da17e1 100644
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -3,6 +3,10 @@ lib-y += compiler-rt.o
+ # simplefb
+ lib-$(CONFIG_SIMPLE_FB) += simplefb/simplefb.o
+ 
++# LZ4 kernel images; byte accesses only, the MMU may still be off
++lib-$(CONFIG_KERNEL_LZ4) += lz4/lz4.o
++CFLAGS_lz4.o += -O2 -mstrict-align -mgeneral-regs-only
++
+ # debug
+ lib-y += console/console.o
+ 
+diff --git a/lib/lz4/lz4.c b/lib/lz4/lz4.c
+new file mode 100644
+index 0000000..91b13a1
+--- /dev/null
++++ b/lib/lz4/lz4.c
+@@ -0,0 +1,122 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * LZ4 decompressor for the "legacy" frame format (lz4 -l), the one Linux
++ * uses for compressed kernels: a magic number, then blocks of at most
++ * 8 MiB of output, each prefixed by its compressed size and decoded on
++ * its own.
++ *
++ * Byte accesses only: this runs before the MMU is on, where memory is
++ * Device memory and unaligned or wider accesses would fault.
++ */
++
++#include <stdint.h>
++#include <lib/lz4.h>
++
++#define LZ4_LEGACY_MAGIC	0x184c2102u
++#define LZ4_LEGACY_BLOCK	(8u << 20)
++#define LZ4_MIN_MATCH		4
++
++static uint32_t get_le32(const uint8_t *p)
++{
++	return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
++}
++
++/* One LZ4 block; returns the decoded size or -1 for corrupt input. */
++static long lz4_block(const uint8_t *ip, unsigned long srclen,
++		      uint8_t *dst, unsigned long dstmax)
++{
++	const uint8_t *iend = ip + srclen;
++	uint8_t *op = dst, *oend = dst + dstmax;
++
++	for (;;) {
++		unsigned long len, off;
++		unsigned int token;
++		const uint8_t *match;
++		uint8_t b;
++
++		if (ip >= iend)
++			return -1;
++		token = *ip++;
++
++		/* literals */
++		len = token >> 4;
++		if (len == 15) {
++			do {
++				if (ip >= iend)
++					return -1;
++				b = *ip++;
++				len += b;
++			} while (b == 255);
++		}
++		if (len > (unsigned long)(iend - ip) ||
++		    len > (unsigned long)(oend - op))
++			return -1;
++		while (len--)
++			*op++ = *ip++;
++
++		/* the last sequence has literals only */
++		if (ip == iend)
++			break;
++
++		/* match */
++		if (iend - ip < 2)
++			return -1;
++		off = ip[0] | ip[1] << 8;
++		ip += 2;
++		if (!off || off > (unsigned long)(op - dst))
++			return -1;
++		len = token & 15;
++		if (len == 15) {
++			do {
++				if (ip >= iend)
++					return -1;
++				b = *ip++;
++				len += b;
++			} while (b == 255);
++		}
++		len += LZ4_MIN_MATCH;
++		if (len > (unsigned long)(oend - op))
++			return -1;
++		match = op - off;
++		while (len--)
++			*op++ = *match++;
++	}
++
++	return op - dst;
++}
++
++long lz4_legacy_decompress(const void *src, unsigned long srclen,
++			   void *dst, unsigned long dstmax)
++{
++	const uint8_t *ip = src, *iend = ip + srclen;
++	uint8_t *op = dst;
++	unsigned long left = dstmax;
++
++	if (srclen < 4 || get_le32(ip) != LZ4_LEGACY_MAGIC)
++		return -1;
++	ip += 4;
++
++	/* the section may be padded after the last block */
++	while (iend - ip >= 4) {
++		uint32_t size = get_le32(ip);
++		unsigned long max;
++		long n;
++
++		ip += 4;
++		if (size == LZ4_LEGACY_MAGIC)	/* concatenated streams */
++			continue;
++		if (!size)
++			break;
++		if (size > (unsigned long)(iend - ip))
++			return -1;
++		max = left < LZ4_LEGACY_BLOCK ? left : LZ4_LEGACY_BLOCK;
++		n = lz4_block(ip, size, op, max);
++		if (n < 0)
++			return -1;
++		ip += size;
++		op += n;
++		left -= n;
++	}
++
++	return op - (uint8_t *)dst;
++}

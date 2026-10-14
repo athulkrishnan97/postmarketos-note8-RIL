@@ -1220,3 +1220,24 @@ the work below was done offline.)
   0x807f0000/0x807ec000/0x807ef000), not used by VSS for CP calls.
 - To check after a full power-off: one call with audio both ways.
 
+## 2026-10-14 ~21:30 LZ4 KERNEL IN uniLoader (boot-v207, 18.5 MB)
+- uniLoader now carries the kernel LZ4-compressed (legacy format, lz4 -l -9)
+  and unpacks it to 0x80200000 (CONFIG_KERNEL_LZ4, in
+  aports/uniloader-samsung-greatlte/greatlte.patch, pkgrel 3). Boot image
+  41.6 MB -> 18.5 MB (BOOT partition is 41,943,040).
+- S-boot enters uniLoader at EL1 with the MMU off (SCTLR_EL1 0x30c5183e:
+  alignment checks on), so data accesses are uncached Device accesses and
+  unpacking took 8.9 s (boot-v206). For the unpacking only it now turns on
+  an identity map with caches (lz4-cache.S): Normal memory only for the
+  payload area and uniLoader itself (2 MiB blocks), everything else Device,
+  then cleans both ranges to PoC and restores SCTLR before the jump. Unpack
+  0.30 s; reset-to-kernel 5.93 s vs 6.16 s with the raw kernel (S-boot
+  reads less flash). The decoder is byte-access only (alignment checks).
+- /proc/device-tree/chosen/uniloader,{lz4-ticks,sctlr,lz4-cached} record
+  the unpack time (26 MHz ticks) and state; tools/boottime.c prints the
+  reset-to-kernel time.
+- Laptop: work/ul-lz4 (uniLoader tree with blob/Image = LZ4, blob/Image.raw
+  = raw v205 kernel), work/boot-v207-lz4cache.img (flashed, kernel #19 as
+  v205). Fallback: work/boot-v205-androidnet.img.
+- Manual rebuild: lz4 -l -9 -f Image ul-lz4/blob/Image, then make (README).
+

@@ -207,17 +207,22 @@ pmbootstrap build device-samsung-greatlte
 
 ### 2. Boot image (uniLoader shim)
 
-uniLoader carries the kernel Image + dtb concatenated after itself.
+uniLoader carries the kernel Image + dtb concatenated after itself. The
+kernel is stored LZ4-compressed and uniLoader unpacks it at boot (0.3 s, with
+the caches on): the raw 40 MB kernel no longer fits the 40 MiB BOOT
+partition, the compressed one gives a ~17 MB boot image.
 
 ```sh
 git clone https://github.com/ivoszbg/uniLoader.git
 cd uniLoader
-cp /path/to/postmarketos-note8/uniloader-files/board-greatlte.c board/samsung/
-cp /path/to/postmarketos-note8/uniloader-files/greatlte_defconfig configs/
+git checkout e8466561575ed4e2e23217b54b751ea30273549e
+# board file, defconfig and the LZ4 kernel support:
+patch -p1 < /path/to/postmarketos-note8/aports/uniloader-samsung-greatlte/greatlte.patch
 
-# kernel artifacts from the pmbootstrap build (or a scratch tree build):
-cp <builddir>/usr/share/kernel/postmarketos-exynos8895/Image blob/Image 2>/dev/null || \
-cp <path-to>/arch/arm64/boot/Image blob/Image
+# kernel artifacts from the pmbootstrap build (or a scratch tree build),
+# compressed in the LZ4 legacy format (lz4 -l):
+lz4 -l -9 -f <builddir>/usr/share/kernel/postmarketos-exynos8895/Image blob/Image 2>/dev/null || \
+lz4 -l -9 -f <path-to>/arch/arm64/boot/Image blob/Image
 cp <path-to>/arch/arm64/boot/dts/exynos/exynos8895-greatlte.dtb blob/dtb
 
 make -s ARCH=aarch64 CROSS_COMPILE=aarch64-linux-gnu- clean
