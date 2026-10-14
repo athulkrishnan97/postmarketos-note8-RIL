@@ -4,7 +4,7 @@ maintainer="Jonas Heinrich <onny@project-insanity.org>"
 _flavor="postmarketos-exynos8895"
 pkgname=linux-$_flavor
 pkgver=7.0
-pkgrel=21
+pkgrel=22
 pkgdesc="Close-to-mainline kernel for Samsung Exynos 8895 devices"
 arch="aarch64"
 _carch="arm64"
@@ -76,6 +76,7 @@ source="
 	exynos8895-suspend.patch
 	exynos8895-call-audio.patch
 	exynos8895-decon-flip-irq.patch
+	exynos8895-abox-l2c.patch
 "
 
 
@@ -143,4 +144,5 @@ e275302b5b98b4f84234f194025565d3ad1d66592fe91b877290adbd5b5ba072f3bd4b59956e5d33
 dd4a7ffe83c98bbafc5ba537078017b03711390dd4b95d8cc14602ba99d9921435cf16c2dc6e36e9f536b35c5d28dd51eae0c9dbb1340b54fabbc77ba93bddd0  exynos8895-suspend.patch
 e35162e7a3deac399050fd02639f21541c94fdf061a593acc93bc681953055244f3e585bcce999ddf6122b95bfe6e28a9b8ff75e3998a45a8d034f63fb922d1c  exynos8895-call-audio.patch
 a51eabf5ef1f4ba4068be00b85c8277acdbf99263ee8948dbd7977b69e11d85fb949c23b75659635dea7965d952ed6ea03043e87d8eeed2f747033d5e5f50656  exynos8895-decon-flip-irq.patch
+73265b84d23b036c5cafa5302b2a3b563c36afb2c37ab001f7334a342f125a5d0ec2e0ae0542991e0d30151d492ce436ac5b89da83df49392b1408cbe124c3b4  exynos8895-abox-l2c.patch
 "

@@ -1359,12 +1359,26 @@ ModemManager client. Pieces:
 - Levels: earpiece -12 dB (HPOUT3 Digital Volume 104), mics +12 dB (152;
   stock uses +6 dB with its own VSS tuning).
 
-What was not needed: the stock tuning files (AP_AUDIO_SLSI.bin and friends),
-the L2C handshake, the firmware component controls ("OEM", "ERAP info") and
-the CSA0 firmware; the CQK0 firmware on the phone works. The SND commands
-make no audible difference but match the stock HAL.
+- L2 cache for the A7 (kernel r22, exynos8895-abox-l2c.patch): after every
+  firmware boot the driver hands the VTS SRAM to the ABOX
+  (VTS_SHARED_MEM_CTRL 0x1402100c = 1) and sends ABOX_START_L2C_CONTROL(1);
+  the firmware answers END_L2C_CONTROL ("L2 cache on" in dmesg). Without it
+  VSS decodes the downlink and receives the mics, but its output to RDMA4
+  and its encoder input are all zero: silence both ways. Downstream does the
+  same at call PCM open (vts_acquire_sram()).
+
+What was not needed: the stock tuning files (AP_AUDIO_SLSI.bin and friends;
+they are the ABOX's own Fortemedia parameters for VoIP and barge-in, not for
+CP calls), the firmware component controls ("OEM", "ERAP info") and the CSA0
+firmware; the CQK0 firmware on the phone works. The SND commands make no
+audible difference but match the stock HAL.
 
 Debugging traps:
+- The L2C setting survives a warm reboot (reboot command, download mode),
+  and so does most RAM. It was set by hand once during bring-up and the
+  "control" runs without it, all after warm reboots, still worked; it was
+  wrongly judged unnecessary. Calls failed only after the phone was fully
+  reset. Test anything that might leave state behind from a power-off.
 - The downlink seemed silent because the test recorded before VSS was
   established, and later because enabling fw_log mid-call flushed a stale
   "VHM_EstablishCall".

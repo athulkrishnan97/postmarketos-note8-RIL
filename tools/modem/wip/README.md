@@ -81,7 +81,10 @@ and secril-client). Then the codec routes: earpiece out and main mic in.
 
 - Downlink: never broken. The silent results were test artifacts: recording
   before VSS established, and a stale "VHM_EstablishCall" flushed by turning
-  on fw_log mid-call. Every control (tuning files, L2C, components, CSA0
+  on fw_log mid-call. (Correction, 10-14: L2C IS needed. It had been
+  turned on by hand earlier that morning and survives warm reboots, so the
+  "without L2C" control below still had it; see docs/BRINGUP.md.)
+  Every control (tuning files, L2C, components, CSA0
   firmware, SND commands, firmware log never drained) still gives speech.
 - Earpiece: AIF1RX1 -> HPOUT3L -> OUT3 demux HPOUT4, as stock. The test's
   own mixer recording tap (NSRC0 <- SIFS0) is what distorted it.

@@ -1,0 +1,67 @@
+From: Athul <athulkrishnan97@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 21:15:00 +0100
+Subject: [PATCH] ASoC: samsung: abox: give the A7 its L2 cache at boot
+
+VSS, the CP's voice firmware running on the ABOX A7, sends silence in
+both directions of a call unless the firmware has taken the VTS SRAM as
+its L2 cache. Downstream hands the SRAM over (VTS_SHARED_MEM_CTRL) and
+sends ABOX_START_L2C_CONTROL at call PCM open; do it once after every
+firmware boot. The firmware answers with ABOX_END_L2C_CONTROL.
+
+The setting survives a warm reboot, so calls kept working after it was
+once set by hand and only failed after a full power cycle.
+---
+--- a/sound/soc/samsung/abox/abox.c
++++ b/sound/soc/samsung/abox/abox.c
+@@ -392,6 +392,9 @@
+ 		if (data->log)
+ 			schedule_delayed_work(&data->log_work, 0);
+ 		break;
++	case ABOX_END_L2C_CONTROL:
++		dev_info(dev, "L2 cache %s\n", sys->param1 ? "on" : "off");
++		break;
+ 	case ABOX_REPORT_FAULT:
+ 		dev_err(dev, "firmware fault %d (%#x, %#x)\n", sys->param1,
+ 			sys->param2, sys->param3);
+@@ -701,6 +704,33 @@
+ 	return 0;
+ }
+ 
++/*
++ * VSS only processes call audio once the A7 has its L2 cache, which lives in
++ * the VTS block's SRAM: hand that SRAM to the ABOX and tell the firmware to
++ * take it (downstream does this at call PCM open, in vts_acquire_sram()).
++ * Without it VSS sends silence both ways. The setting survives a warm
++ * reboot, which once hid that it is needed.
++ */
++#define VTS_SHARED_MEM_CTRL		0x1402100c
++#define VTS_MEM_SEL_ABOX		BIT(0)
++
++static void abox_l2c_enable(struct abox_data *data)
++{
++	void __iomem *ctrl = ioremap(VTS_SHARED_MEM_CTRL, 4);
++	int ret;
++
++	if (!ctrl) {
++		dev_err(data->dev, "cannot map the VTS SRAM control\n");
++		return;
++	}
++	writel(VTS_MEM_SEL_ABOX, ctrl);
++	iounmap(ctrl);
++
++	ret = abox_ipc_system(data, ABOX_START_L2C_CONTROL, 1, 0, 0);
++	if (ret)
++		dev_err(data->dev, "L2C enable IPC failed: %d\n", ret);
++}
++
+ int abox_boot(struct abox_data *data)
+ {
+ 	struct device *dev = data->dev;
+@@ -791,6 +821,7 @@
+ 	}
+ 	if (ret)
+ 		dev_warn(dev, "resume IPC failed: %d\n", ret);
++	abox_l2c_enable(data);
+ 	goto out;
+ 
+ fail:

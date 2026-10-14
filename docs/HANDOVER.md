@@ -1199,3 +1199,24 @@ the work below was done offline.)
   image (Thumb-2, runs at 0xa0000000; trace entries in RADIO MAIN). Tools in
   tools/modem/vsslog; tonehunt/echoref/bufprobe scripts in the session
   scratchpad (to be added if useful).
+
+## 2026-10-14 ~21:15 CALL AUDIO FIXED: A7 L2 CACHE (KERNEL r22)
+- Cause of the silence since 10-13 afternoon: the ABOX firmware never got
+  its L2 cache (VTS SRAM). I set it by hand during bring-up on 10-13 10:08
+  (VTS_SHARED_MEM_CTRL 0x1402100c = 1 + system message
+  ABOX_START_L2C_CONTROL(1)). It survives warm reboots, so every later test
+  "without L2C" still had it. The hard reset at ~14:55 (v202 black screen,
+  key combo to download mode) cleared it. Since then VSS output zeros both
+  ways. The modem IPC sequence, the Calliope firmware, VSS memory and the
+  network mode were all identical between good and bad calls.
+- Confirmed by the user: L2C sent by hand -> mic and earpiece both work.
+- Fix: exynos8895-abox-l2c.patch (pkgrel 22): abox_boot() writes the VTS
+  register and sends START_L2C_CONTROL after ABOX_RESUME; dmesg shows
+  "L2 cache on". Built in linux-7.0-ril and installed on the phone as a
+  module (boot image unchanged; the r21 module is backed up in
+  /root/snd-soc-samsung-abox.ko.zst.r21).
+- Ruled out on the way: the stock ext bins (AP_AUDIO_SLSI.bin etc.) are the
+  ABOX's own Fortemedia VoIP/barge-in parameters (the ABOX firmware reads
+  0x807f0000/0x807ec000/0x807ef000), not used by VSS for CP calls.
+- To check after a full power-off: one call with audio both ways.
+
