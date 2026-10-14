@@ -1158,3 +1158,24 @@ the work below was done offline.)
   v205 module is in /root/snd-soc-samsung-abox.ko.zst.v205. No boot image.
 - Debug aid: echo Y > /sys/module/snd_soc_samsung_abox/parameters/fw_log
   prints the ABOX firmware log (VHM_EstablishCall, gear changes) to dmesg.
+
+## 2026-10-14 ~19:45 CALL AUDIO STILL SILENT; VSS LOG DECODED; DAILY SETUP BACK
+- Last call with audio both ways: 2026-10-13 14:01 (incoming). Everything
+  since is silent both ways, outgoing and incoming. Ruled out by test: kernel
+  (v201 + its original audio modules), mifmon (pre-WS46 build), 2G-only,
+  cold boot, callaudio ordering (call DMAs before/after the codec streams),
+  gear (1.18 GHz confirmed), stock nv_data.bin (from the 10-10 EFS backup;
+  the previous file is /root/nv_data.bin.20261014, the stock one stays in
+  place), earpiece/mics/codec (tone + record test fine), CPEFS unchanged.
+- Only phone change between the last good call and the first fallback test:
+  allowed modes 2g|3g|4g (14:04).
+- Measured during calls: modem<->VSS active; VSS decodes the downlink
+  (Abox_vhmVocRxDecCnt ~940 per call), RX/TX unmuted at channel init, no
+  mute events; RDMA4 SRAM buffer (0x13f21410) stays all zero; WDMA2 (mic)
+  full of data but the AMR encoder reports SP 0 / VAD 0 / DTX. Speech-level
+  audio exists inside VSS memory (+0x32c800..). So VSS <-> ABOX DMA hand-off
+  is where it breaks. tools/modem/vsslog decodes the VSS trace ring.
+- Phone back on the daily setup: boot-v205 (#19), /lib/modules/7.0.0 = v205
+  tree with the r21 abox module, current mifmon, modes 2g|3g|4g,
+  /etc/modprobe.d/abox-debug.conf (fw_log=1) kept for the next tests. The
+  v204 tree is /lib/modules/7.0.0.v204-backup again.
